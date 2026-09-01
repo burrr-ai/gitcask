@@ -815,8 +815,18 @@ async fn jwt_push_clone_scope_expiry_spoofing_signature_and_lfs() -> TestResult 
         git_in(&src, &["commit", "-m", "jwt lfs"])?;
         git_in(&src, &["push", "origin", "main"])?;
         let lfs_clone = tempfile::tempdir()?;
+        // The smudge filters come on the command line: the clone must not depend on a
+        // global `git lfs install` having run on this machine.
         git(
             &[
+                "-c",
+                "filter.lfs.clean=git-lfs clean -- %f",
+                "-c",
+                "filter.lfs.smudge=git-lfs smudge -- %f",
+                "-c",
+                "filter.lfs.process=git-lfs filter-process",
+                "-c",
+                "filter.lfs.required=true",
                 "clone",
                 &admin_url,
                 lfs_clone
