@@ -2,6 +2,10 @@ name: CI
 
 # Runs `just ci` plus the rustfs smoke test — the same tiers contributors run locally.
 # The tier definitions live in the justfile, never duplicated here.
+#
+# One job, deliberately: `just ci` and the smoke test share one debug target dir, so the
+# smoke build after `just ci` is an incremental no-op instead of a second cold workspace
+# compile on a second runner (which doubled the billed minutes).
 
 on:
   push:
@@ -18,9 +22,11 @@ env:
   RUSTUP_TOOLCHAIN: 1.97.1
 
 jobs:
-  build-test:
-    name: just ci
+  ci:
+    name: just ci + rustfs smoke
     runs-on: ubuntu-latest
+    # A hung job bills for 6 hours by default. A cold run is ~35 minutes; a warm one far less.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -32,22 +38,16 @@ jobs:
       - name: Install the pinned Rust toolchain
         run: rustup show && cargo --version && git --version
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Save the compile cache even when a test fails; otherwise every run after a red
+          # one starts cold and a failing streak pays full compile time on every push.
+          cache-on-failure: true
       - uses: taiki-e/install-action@v2
         with:
           tool: just
 
       - run: just ci
 
-  smoke:
-    name: rustfs smoke
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - name: Install the pinned Rust toolchain
-        run: rustup show && cargo --version && git --version
-      - uses: Swatinem/rust-cache@v2
       - name: Start rustfs and create the test bucket
         run: |
           docker compose up -d --wait rustfs

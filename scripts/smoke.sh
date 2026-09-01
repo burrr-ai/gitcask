@@ -67,7 +67,9 @@ else
     curl -sf -X DELETE $BASE/smoke/retryable-503.git >/dev/null || true
 fi
 # push to a nonexistent repo must fail (auto_create off)
-git init -q $W/src && (cd $W/src && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one)
+# -b main: later cases resolve `main` locally; without it the branch name depends on the
+# machine's init.defaultBranch (GitHub runners default to master, so 3 merge cases failed).
+git init -q -b main $W/src && (cd $W/src && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one)
 if (cd $W/src && git push -q $BASE/$REPO.git HEAD:main 2>/dev/null); then bad "push before create should be refused"; else ok "push before create refused"; fi
 check curl -sf -X PUT $BASE/$REPO.git
 check sh -c "cd $W/src && git push -q $BASE/$REPO.git HEAD:main"
