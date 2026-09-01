@@ -1,0 +1,17 @@
+target/
+*.orig
+spike-results/
+
+# local secrets / environment — never in the repo
+.env
+.env.*
+*.senv
+.senv
+.dev/
+.pi/
+
+# local review dumps (findings, smoketests, notes — not for the repo)
+.review/
+
+# Orca editor-local scratch (dropped files, UI state)
+.orca/

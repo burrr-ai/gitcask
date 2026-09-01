@@ -1,0 +1,38 @@
+[package]
+name = "gitcask-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["s3"]
+s3 = ["dep:aws-sdk-s3", "dep:aws-smithy-types", "dep:reqwest"]
+testing = ["dep:parking_lot"]
+
+[dependencies]
+gitcask-proto.workspace = true
+gitcask-config.workspace = true
+prost.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+parking_lot = { workspace = true, optional = true }
+rand.workspace = true
+uuid.workspace = true
+aws-sdk-s3 = { workspace = true, optional = true }
+aws-smithy-types = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+[dev-dependencies]
+axum.workspace = true
+tempfile.workspace = true
+sha1 = { workspace = true }
+bytesize = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

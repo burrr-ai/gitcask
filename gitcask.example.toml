@@ -1,0 +1,141 @@
+# gitcask.toml — every configuration key, with its default and a comment.
+#
+# Start from gitcask.standalone.toml for a first run; come here when you need a key.
+# Every key can also be set from the environment: GITCASK__SECTION__KEY=value (TOML value syntax).
+# Validate with: gitcask config check gitcask.toml
+
+[server]
+listen = "127.0.0.1:8080"        # default; `auth_mode = none` is refused unless this is loopback. Public bind: 0.0.0.0 with jwt/forwarded.
+auth_mode = "none"                # "none" | "jwt" | "forwarded"; none grants write+admin and is loopback-only
+max_concurrent_requests = 512     # global cap on in-flight git requests
+max_concurrent_per_repo = 64      # per-repo cap (upload-pack / receive-pack)
+request_timeout = "1h"
+drain_timeout = "20s"             # after SIGTERM, phase 2: how long in-flight requests may finish once /readyz is 503
+                                  # and new fetch/push/LFS are refused (503 + Retry-After). The running maintenance unit
+                                  # is interrupted at once in phase 1 while serving continues.
+max_push_bytes = "64GiB"          # largest accepted push
+# Roles this instance performs: "serve" (git, API, UI, LFS), "maintain" (checkpoints,
+# compaction, fsck — implies compact), "events" (the webhook bridge).
+# Empty = all of them: the one-box shape.
+roles = []
+auto_create_on_push = false       # create a repo on first push if missing
+accel_redirect = false            # behind an nginx edge that announces `X-Gitcask-Capabilities: accel-redirect`
+                                  # (deploy/nginx.conf.example): answer LFS byte requests with X-Accel-Redirect
+                                  # so the edge streams + caches the bytes from the bucket itself. Never on a host
+                                  # clients reach directly (the answer carries a store credential).
+# public_url = "https://git.example.com"   # pins absolute LFS URIs behind a proxy
+# Browser origins allowed to call /{owner}/{repo}/api-browser/* cross-origin with credentials (the
+# browser lane from another site). Exact origins or one leading `*.`; empty = no
+# cross-origin lane (no CORS headers).
+# cors_origins = ["https://docs.example.com"]
+
+# forwarded requires X-Gitcask-Principal from the front proxy; X-Gitcask-Write: 1
+# and X-Gitcask-Admin: 1 grant permissions. Set GITCASK_FORWARD_SECRET to require
+# the matching X-Gitcask-Forward-Secret header. Authorization is ignored in that mode.
+
+[auth.jwt]                         # used when server.auth_mode = "jwt"; EdDSA (Ed25519) only
+# Exactly one key source: a cached remote JWKS, or a public-key PEM/path.
+# jwks_url = "https://issuer.example/.well-known/jwks.json"
+# public_key = "/etc/gitcask/public.pem"  # or literal -----BEGIN PUBLIC KEY----- PEM
+issuer = ""                       # exact `iss` claim; required in jwt mode
+# audience = "gitcask"             # optional exact member of the `aud` claim
+leeway = "60s"                    # exp/iat/nbf clock skew
+# Tokens carry sub, scopes, exp, iat, and jti. Scope: <owner>/<repo>:read|write|admin;
+# `*` is allowed only in the repository segment, and admin implies write implies read.
+#
+# Lifetime belongs to the use case, not to one default. Git stores a working credential in the
+# OS helper (keychain, libsecret, wincred), so a token a *person* uses that dies after an hour
+# means a password prompt several times a day — the reason GitHub PATs are effectively long-lived.
+#
+#   platform backend -> gitcask    minutes    minted per request, never stored
+#   session / sandbox agent        the session discarded when the session ends
+#   a person's git CLI             weeks      lives in the credential helper and is reused
+#
+# There is no revocation list by design (that would be state). Pay for it with narrow scopes
+# instead: one repository, the least permission that works.
+
+[store]
+backend = "s3"                    # default; "s3" (AWS, MinIO, rustfs, R2, Ceph, …) | "memory" (tests)
+bucket = "gitcask"
+prefix = ""                       # global key prefix inside the bucket
+max_retries = 4                   # transient failures; full-jitter backoff, each delay <= 2s (<= 8s total at default)
+multipart_threshold = "64MiB"     # PUTs above this use multipart uploads
+multipart_part_size = "32MiB"
+
+[store.s3]
+endpoint = "https://s3.us-east-1.amazonaws.com"   # or http://127.0.0.1:9000 for rustfs/MinIO
+region = "us-east-1"
+access_key_env = "AWS_ACCESS_KEY_ID"     # env var names read at runtime; AWS_SESSION_TOKEN is also honored when set
+secret_key_env = "AWS_SECRET_ACCESS_KEY"
+force_path_style = false          # true for most self-hosted S3 implementations
+
+[cache]
+dir = "/tmp/gitcask"              # local materialized repos
+bulk_threads = 2                   # async workers for isolated pack materialization; blocking fs/git uses spawn_blocking
+disk_high_watermark = 0.9         # evict repos when the filesystem holding `dir` is fuller than this (0 = never)
+evict_idle_after = "6h"
+evict_interval = "60s"            # how often serving instances evict idle repos and relieve disk pressure
+ref_advert_entries = 256          # max rendered ref advertisement cache entries
+shared_render_cache = true        # mirror rendered sha-addressed API JSON into the store (all instances share)
+shared_retention = "30d"          # expire shared API JSON and archive objects during the next per-repo bucket GC
+
+[wal]
+batch_window = "5ms"              # coalesce concurrent publishes into one CAS
+max_batch = 64                    # max pushes per batched index update
+snapshot_every_entries = 256      # checkpoint (ref snapshot + pack inventory, log folded) every N entries …
+checkpoint_interval = "1h"        # … or when the last checkpoint is this old (0 = off) …
+checkpoint_tail_bytes = "8MiB"    # … or when the log tail after it exceeds this (0 = off); refs-level work
+cas_max_retries = 16              # CAS retry cap on PreconditionFailed
+fsck_objects = true               # verify pushed objects before publish
+check_connectivity = true         # require ref tips connected to existing objects
+freshness_ttl = "0s"              # 0 = always revalidate manifest.pb
+prefetch_packs = true             # after a refs-only sync, download packs in the background …
+
+[maintenance]                     # the `maintain` role: consume pending/<owner>/<repo> markers after pushes
+interval = "60s"                  # wait this long before listing again when there are no markers
+workers = 8                       # concurrent repos; each may materialize a full copy, so leave cache/disk headroom
+max_repos_per_pass = 1000         # maximum pending repositories consumed by one pass (one LIST page)
+checkpoints = true                # unit 1: checkpoint marked repos whose wal.* trigger fired (refs-level)
+# host = "maintainer-1"           # heartbeat object maintain/<host>.pb (default: instance id) — the plan shows who maintains a repo
+heartbeat_ttl = "1h"              # heartbeats older than this are deleted; stale instances disappear from operational views
+fsck_interval = "7d"              # lowest-priority: audit immediately after compaction; otherwise after this age only when fsck.pb exists and a newer push arrived
+                                  # (missing objects → gitcask_repo_missing_objects{repo}); 0 = no age delay, still requires a prior audit + newer push
+                                  # time-based checkpoint/fsck triggers are evaluated only for marked repos; use the CLI for repos with no pushes
+
+[compaction]
+enabled = true
+factor = 2                        # geometric repack factor
+trigger_packs = 16                # compact when this many tier-0 packs exist
+trigger_bytes = "1GiB"            # or when tier-0 pack bytes exceed this (either way: at least 2 fresh packs)
+lease_ttl = "10m"                 # compaction/checkpoint lease TTL
+retention_superseded = "7d"       # keep superseded packs, folded logs and old checkpoints for rewind before bucket GC
+
+[lfs]
+enabled = true
+serve_via = "proxy"               # "proxy" | "signed_url"
+signed_url_ttl = "1h"
+max_object_bytes = "16GiB"
+
+[git]
+allow_filter = true               # uploadpack.allowFilter
+allow_any_sha1_in_want = false    # uploadpack.allowAnySHA1InWant
+object_format = "sha1"            # default for new repos: "sha1" | "sha256"
+commit_graph = true               # maintain a split commit-graph chain per repo
+commit_graph_changed_paths = false # Bloom filters for incremental layers (diffs against parent trees)
+max_wants = 0                     # refuse a fetch wanting more objects than this (0 = off): a blobless clone without
+                                  # --sparse/--no-checkout lazily fetches every blob of HEAD at once; the ERR names the fix
+max_commit_changes = 1000         # maximum upsert/delete/rename operations in one POST /api/commits request
+max_commit_bytes = "16MiB"        # maximum total decoded bytes across that request's base64 upserts
+
+[telemetry]
+log_format = "pretty"             # "json" | "pretty"
+log_filter = "info,gitcask=debug"  # EnvFilter; overridden by RUST_LOG
+metrics = true                    # Prometheus on /metrics
+# trace_project = ""              # GCP project for trace-id correlation in JSON logs (optional)
+lock_wait_warn = "1s"             # WARN "lock wait" (lock, repo, wait_ms, request_id) when a request waits longer than this on
+                                  # rw/sync_mutex/pack_mutex/bulk permits; histogram gitcask_lock_wait_seconds{lock}
+
+[events]                          # docs/EVENTS.md — read only by the bridge (roles ∋ "events"); never gates a push
+# webhook_url = "https://hooks.example.com/gitcask"   # each batch of ref events is POSTed as a JSON array
+# webhook_secret = ""             # X-Gitcask-Signature: sha256=<HMAC-SHA256 of the body>; unset = unsigned
+# sweep_interval = "5m"           # LIST pending/ + locally cached repos; warns when unpublished entries are found; 0 = off

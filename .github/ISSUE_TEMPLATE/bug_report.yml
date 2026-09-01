@@ -1,0 +1,52 @@
+name: Bug report
+description: Report a reproducible gitcask defect
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here. Use the private link in SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: The gitcask version, image digest, or Git commit tested.
+    validations:
+      required: true
+  - type: textarea
+    id: deployment
+    attributes:
+      label: Deployment
+      description: Store, gate mode, server roles, Git version, and relevant configuration with secrets removed.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and logs
+      description: Include relevant client/server output after removing tokens and repository data.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: I removed credentials and private repository contents.
+          required: true

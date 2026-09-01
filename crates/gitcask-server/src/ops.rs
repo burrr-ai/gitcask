@@ -1,0 +1,585 @@
+//! Repository maintenance operations ("make the repo great"): fsck, compaction,
+//! checkpoints and re-materialization. Shared by the background loops
+//! (`gitcask serve` roles), the CLI, and the browsing API's `POST …/ops/{op}` route,
+//! which streams the op's log as SSE and records the outcome per instance.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Instant;
+use tracing::Instrument;
+
+use gitcask_config::Config;
+use gitcask_git::{RepackMode, RepackOptions, RepoId};
+use gitcask_store::ObjectStoreExt;
+use gitcask_wal::RepoHandle;
+use prost::Message;
+use serde::Serialize;
+use utoipa::ToSchema;
+
+use crate::AppState;
+
+/// Callback that receives human-readable progress lines.
+pub type Log<'a> = &'a (dyn Fn(String) + Send + Sync);
+
+pub fn noop_log(_: String) {}
+
+// ---------------------------------------------------------------------------
+// Catalogue
+// ---------------------------------------------------------------------------
+
+/// Ops the UI can trigger. `id` is the URL segment.
+#[derive(Serialize, Clone, ToSchema)]
+pub struct OpSpec {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    /// Query parameters the op accepts (documentation for the UI).
+    pub params: &'static [&'static str],
+    /// Whether this op changes the WAL (everything but fsck/sync is a write).
+    pub mutating: bool,
+}
+
+/// How many missing oids one `fsck.pb` carries.
+pub const FSCK_MISSING_LIST_MAX: usize = 100_000;
+
+/// Whether a task kind is a maintenance op (the units the D31 maintenance drain
+/// waits for; request-driven materialization tasks are not).
+pub fn is_op(kind: &str) -> bool {
+    OPS.iter().any(|o| o.id == kind)
+}
+
+pub const OPS: &[OpSpec] = &[
+    OpSpec {
+        id: "fsck",
+        label: "fsck",
+        description: "git fsck --full --strict on this instance's copy (deep object/connectivity check). \
+                      connectivity=1 skips object content checks. Records the verdict at fsck.pb.",
+        params: &["connectivity"],
+        mutating: false,
+    },
+    OpSpec {
+        id: "rev-index",
+        label: "Reverse index",
+        description: "Build pack-<sha>.rev for a published pack that has none (git < 2.41 wrote none), upload it \
+                      as the side-file and advertise it in the manifest (has_rev). Without it git rebuilds the \
+                      reverse index in memory on every pack-objects.",
+        params: &["pack"],
+        mutating: true,
+    },
+    OpSpec {
+        id: "compact",
+        label: "Compact",
+        description: "Geometric repack under the per-repo compaction lease, published as a COMPACT WAL entry. \
+                      force=1 ignores the trigger thresholds.",
+        params: &["force"],
+        mutating: true,
+    },
+    OpSpec {
+        id: "checkpoint",
+        label: "Checkpoint",
+        description: "Write a checkpoint under the per-repo checkpoint lease (pack set + ref snapshot) at the current head so cold materialization starts from here.",
+        params: &[],
+        mutating: true,
+    },
+    OpSpec {
+        id: "gc",
+        label: "Garbage collect",
+        description: "Delete superseded packs, folded logs, old checkpoints, and expired shared cache objects under the per-repo GC lease.",
+        params: &[],
+        mutating: true,
+    },
+    OpSpec {
+        id: "sync",
+        label: "Sync",
+        description: "Revalidate the manifest and catch this instance's local copy up to the WAL head.",
+        params: &[],
+        mutating: false,
+    },
+    OpSpec {
+        id: "rematerialize",
+        label: "Re-materialize",
+        description: "Throw away this instance's local copy and rebuild it from the store (repair).",
+        params: &[],
+        mutating: false,
+    },
+];
+
+pub fn spec(id: &str) -> Option<&'static OpSpec> {
+    OPS.iter().find(|o| o.id == id)
+}
+
+// ---------------------------------------------------------------------------
+// Running an op = a gitcask_wal task (unique id, (repo, kind) lock, log,
+// attachable stream at GET …/tasks/{id})
+// ---------------------------------------------------------------------------
+
+pub enum StartError {
+    UnknownOp,
+    /// The same op is already running here; attach to this task instead.
+    AlreadyRunning(Arc<gitcask_wal::tasks::TaskState>),
+}
+
+/// Start `op` for `id` on this instance as a background task and return its
+/// state (stream it with [`crate::sse::task_stream`]). The op keeps running if
+/// every client goes away.
+pub async fn start(
+    state: Arc<AppState>,
+    id: RepoId,
+    op: &str,
+    params: HashMap<String, String>,
+) -> Result<Arc<gitcask_wal::tasks::TaskState>, StartError> {
+    let spec = spec(op).ok_or(StartError::UnknownOp)?;
+    let handle = state
+        .registry
+        .open(&id)
+        .await
+        .map_err(|_| StartError::UnknownOp)?;
+    let task = match handle.begin_task(spec.id, params.clone()) {
+        gitcask_wal::Begin::Started(t) => t,
+        gitcask_wal::Begin::AlreadyRunning(s) => return Err(StartError::AlreadyRunning(s)),
+    };
+    let task_state = task.state.clone();
+    let op_id = spec.id;
+    let span = task.span();
+    let join = tokio::spawn(
+        async move {
+            let reporter = task.reporter();
+            let repo = id.to_string();
+            let log = move |line: String| {
+                tracing::info!(repo = %repo, op = op_id, "{line}");
+                reporter.notice(line);
+            };
+            let res = run(&state, &id, op_id, &params, &log).await;
+            match res {
+                Ok((summary, value)) => {
+                    task.finish_ok(summary, Some(value));
+                }
+                Err(e) => {
+                    task.finish_err(500, e);
+                }
+            }
+        }
+        .instrument(span),
+    );
+    task_state.set_abort_handle(join.abort_handle());
+    Ok(task_state)
+}
+
+/// The last connectivity audit of `handle`'s repository, if any.
+pub async fn read_fsck(
+    handle: &RepoHandle,
+) -> Result<Option<gitcask_proto::v1::FsckReport>, String> {
+    use gitcask_store::ObjectStoreExt;
+    match handle.store().get_bytes(gitcask_proto::keys::FSCK).await {
+        Ok(Some((_, bytes))) => gitcask_proto::v1::FsckReport::decode(bytes.as_ref())
+            .map(Some)
+            .map_err(|e| e.to_string()),
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn flag(params: &HashMap<String, String>, key: &str) -> bool {
+    params
+        .get(key)
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+async fn run(
+    state: &Arc<AppState>,
+    id: &RepoId,
+    op: &str,
+    params: &HashMap<String, String>,
+    log: Log<'_>,
+) -> Result<(String, serde_json::Value), String> {
+    let handle = state.registry.open(id).await.map_err(|e| e.to_string())?;
+    match op {
+        "fsck" => {
+            let connectivity = flag(params, "connectivity");
+            let guard = handle.sync_full().await.map_err(|e| e.to_string())?;
+            let seq = handle.applied_seq();
+            log(format!(
+                "local copy at seq {} (manifest head {}), running git fsck{}",
+                seq,
+                handle.manifest().head_seq,
+                if connectivity {
+                    " --connectivity-only"
+                } else {
+                    " --full --strict"
+                }
+            ));
+            let t0 = Instant::now();
+            let mut lines = 0u64;
+            let mut missing: Vec<String> = Vec::new();
+            let report = handle
+                .local()
+                .fsck_streaming(connectivity, |l| {
+                    lines += 1;
+                    // `missing blob <oid>` / `missing tree <oid>` …
+                    if let Some(rest) = l.strip_prefix("missing ")
+                        && let Some(oid) = rest.split_whitespace().nth(1)
+                        && oid.len() >= 40
+                    {
+                        missing.push(oid.to_string());
+                    }
+                    log(l);
+                })
+                .await
+                .map_err(|e| e.to_string())?;
+            drop(guard);
+            missing.sort_unstable();
+            missing.dedup();
+            // The audit result lives in the bucket (not the WAL); the gauge reads it
+            // and every host sees the same verdict.
+            let fsck = gitcask_proto::v1::FsckReport {
+                seq,
+                at: Some(gitcask_proto::time::now()),
+                host: crate::maintain::host_name(state),
+                missing_total: missing.len() as u64,
+                missing: missing
+                    .iter()
+                    .take(FSCK_MISSING_LIST_MAX)
+                    .cloned()
+                    .collect(),
+                problems: report.problems,
+                elapsed_secs: t0.elapsed().as_secs_f64(),
+                repaired_seq: 0,
+                audited_seq: seq,
+            };
+            handle
+                .store()
+                .put_bytes(
+                    gitcask_proto::keys::FSCK,
+                    fsck.encode_to_vec(),
+                    gitcask_store::PutMode::Overwrite,
+                )
+                .await
+                .map_err(|e| format!("writing fsck.pb: {e}"))?;
+            metrics::gauge!("gitcask_repo_missing_objects", "repo" => id.to_string())
+                .set(missing.len() as f64);
+            tracing::info!(repo = %id, seq, missing = missing.len(), problems = report.problems, elapsed_ms = t0.elapsed().as_millis() as u64, "fsck recorded");
+            let summary = if report.ok {
+                format!(
+                    "fsck clean ({lines} lines, {:.0}s)",
+                    t0.elapsed().as_secs_f64()
+                )
+            } else {
+                format!(
+                    "fsck found {} problem(s) ({} missing object(s)), exit {:?}",
+                    report.problems,
+                    missing.len(),
+                    report.exit_code
+                )
+            };
+            let value = serde_json::json!({"ok": report.ok, "problems": report.problems, "missing": missing.len(), "seq": seq});
+            // Missing objects are a finding reported through the record and metric.
+            // Corrupt objects stay a failure.
+            if report.ok || !missing.is_empty() {
+                Ok((summary, value))
+            } else {
+                Err(summary)
+            }
+        }
+        "rev-index" => {
+            // Desired state: every pack in the manifest advertises a `.rev`.
+            let checksum = params
+                .get("pack")
+                .cloned()
+                .ok_or("rev-index: missing `pack` (checksum)")?;
+            let oid = gix_hash::ObjectId::from_hex(checksum.as_bytes())
+                .map_err(|e| format!("rev-index: bad checksum {checksum}: {e}"))?;
+            let t0 = Instant::now();
+            let rev = handle
+                .local()
+                .write_rev_index(&oid)
+                .await
+                .map_err(|e| format!("rev-index: {e}"))?;
+            let bytes = std::fs::metadata(&rev).map(|m| m.len()).unwrap_or(0);
+            log(format!(
+                "pack-{checksum}.rev: {bytes} bytes in {:.1}s; publishing",
+                t0.elapsed().as_secs_f64()
+            ));
+            handle
+                .annotate_pack(&checksum, Some(rev), None, None)
+                .await
+                .map_err(|e| format!("rev-index publish: {e}"))?;
+            tracing::info!(repo = %id, pack = %checksum, bytes, elapsed_ms = t0.elapsed().as_millis() as u64, "rev index published");
+            Ok((
+                format!("pack-{checksum}.rev ({bytes} bytes) published"),
+                serde_json::json!({"pack": checksum, "bytes": bytes}),
+            ))
+        }
+        "compact" => {
+            let force = flag(params, "force");
+            let out = compact_repo(&handle, &state.cfg, CompactRequest { force }, log)
+                .await
+                .map_err(|e| e.to_string())?;
+            let summary = out.summary();
+            Ok((summary, serde_json::to_value(&out).unwrap_or_default()))
+        }
+        "checkpoint" => {
+            let lease = handle
+                .try_checkpoint_lease()
+                .await
+                .map_err(|e| e.to_string())?;
+            let Some(lease) = lease else {
+                return Err("checkpoint lease held by another instance".into());
+            };
+            let result = async {
+                // Refs-level: a checkpoint is manifest + ref snapshot, so it
+                // does not materialize packs.
+                let guard = handle.sync_refs_only().await.map_err(|e| e.to_string())?;
+                drop(guard);
+                log(format!(
+                    "writing checkpoint at seq {}",
+                    handle.manifest().head_seq
+                ));
+                let cp = handle.write_checkpoint().await.map_err(|e| e.to_string())?;
+                Ok((
+                    format!("checkpoint written at seq {}", cp.seq),
+                    serde_json::json!({ "at_seq": cp.seq }),
+                ))
+            }
+            .await;
+            if let Err(error) = lease.release().await {
+                log(format!("checkpoint lease release failed: {error}"));
+            }
+            result
+        }
+        "gc" => {
+            log(format!(
+                "calculating retained bucket objects (WAL retention {}, shared cache retention {})",
+                humantime::format_duration(state.cfg.compaction.retention_superseded),
+                humantime::format_duration(state.cfg.cache.shared_retention)
+            ));
+            let outcome = crate::gc::collect(
+                handle.clone(),
+                state.cfg.compaction.retention_superseded,
+                state.cfg.cache.shared_retention,
+                state.cfg.compaction.lease_ttl,
+            )
+            .await?;
+            let summary = format!(
+                "gc deleted {} pack(s), {} log(s), {} checkpoint(s), {} cache object(s) ({} objects)",
+                outcome.packs, outcome.logs, outcome.checkpoints, outcome.caches, outcome.objects
+            );
+            Ok((summary, serde_json::to_value(&outcome).unwrap_or_default()))
+        }
+        "sync" => {
+            let before = handle.applied_seq();
+            let guard = handle.sync_full().await.map_err(|e| e.to_string())?;
+            drop(guard);
+            let after = handle.applied_seq();
+            let summary = format!(
+                "synced: local seq {before} → {after}, manifest {}",
+                handle
+                    .manifest_version()
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            );
+            Ok((
+                summary,
+                serde_json::json!({ "before": before, "after": after }),
+            ))
+        }
+        "rematerialize" => {
+            log("discarding local copy and rebuilding from the store".into());
+            handle.rematerialize().await.map_err(|e| e.to_string())?;
+            Ok((
+                format!("re-materialized at seq {}", handle.applied_seq()),
+                serde_json::json!({ "seq": handle.applied_seq() }),
+            ))
+        }
+        _ => Err("unknown op".into()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compaction (shared with the serve loop and the CLI)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompactRequest {
+    /// Ignore the trigger thresholds.
+    pub force: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum CompactOutcome {
+    NotTriggered {
+        tier0_packs: usize,
+        tier0_bytes: u64,
+    },
+    LeaseHeld,
+    Published {
+        tier: u32,
+        packs: Vec<String>,
+        superseded: usize,
+    },
+}
+
+impl CompactOutcome {
+    pub fn summary(&self) -> String {
+        match self {
+            CompactOutcome::NotTriggered {
+                tier0_packs,
+                tier0_bytes,
+            } => format!(
+                "compaction not triggered ({tier0_packs} fresh packs, {tier0_bytes} bytes); use force=1"
+            ),
+            CompactOutcome::LeaseHeld => "compaction lease held by another instance".into(),
+            CompactOutcome::Published {
+                tier,
+                packs,
+                superseded,
+            } => format!(
+                "geometric compaction published: {} pack(s) at tier {tier}, superseding {superseded}",
+                packs.len()
+            ),
+        }
+    }
+}
+
+/// Decide whether `handle` needs compaction, take the per-repo lease, repack
+/// Whether the compaction trigger fires for `handle` (same rule as
+/// [`compact_repo`] without `force`).
+pub fn compaction_triggered(handle: &RepoHandle, cfg: &Config) -> bool {
+    let manifest = handle.manifest();
+    let tier0: Vec<_> = manifest.packs.iter().filter(|p| p.tier == 0).collect();
+    let tier0_bytes: u64 = tier0.iter().map(|p| p.pack_size).sum();
+    fold_due(tier0.len(), tier0_bytes, cfg)
+}
+
+/// Geometric folding is due when the fresh tier is over its count or byte trigger **and there is
+/// something to fold**: one pack folds into itself (`git repack --geometric` writes nothing), so a
+/// single big tier-0 pack — an import that never became a base — must not make every maintainer
+/// pass run a 5 s no-op compaction (acme/large, 11.9 GB, 2026-08-22).
+pub fn fold_due(tier0_count: usize, tier0_bytes: u64, cfg: &Config) -> bool {
+    tier0_count >= 2
+        && (tier0_count >= cfg.compaction.trigger_packs
+            || tier0_bytes >= cfg.compaction.trigger_bytes.as_u64())
+}
+
+/// the local copy and publish the result as a COMPACT entry.
+pub async fn compact_repo(
+    handle: &RepoHandle,
+    cfg: &Config,
+    req: CompactRequest,
+    log: Log<'_>,
+) -> anyhow::Result<CompactOutcome> {
+    // Sync to get the latest manifest, then release the read guard: the
+    // publisher needs the repo lock and repack runs on the local copy anyway.
+    drop(handle.sync_full().await?);
+
+    let manifest = handle.manifest();
+    let tier0_packs: Vec<_> = manifest.packs.iter().filter(|p| p.tier == 0).collect();
+    let tier0_count = tier0_packs.len();
+    let tier0_bytes: u64 = tier0_packs.iter().map(|p| p.pack_size).sum();
+    let should_compact = req.force || fold_due(tier0_count, tier0_bytes, cfg);
+    log(format!(
+        "{} live packs: {tier0_count} fresh ({tier0_bytes} bytes)",
+        manifest.packs.len()
+    ));
+    if !should_compact {
+        return Ok(CompactOutcome::NotTriggered {
+            tier0_packs: tier0_count,
+            tier0_bytes,
+        });
+    }
+
+    let lease = handle.try_compaction_lease().await?;
+    let Some(lease) = lease else {
+        return Ok(CompactOutcome::LeaseHeld);
+    };
+
+    let repack_opts = RepackOptions {
+        mode: RepackMode::Geometric {
+            factor: cfg.compaction.factor,
+        },
+        write_bitmap: false,
+        write_midx: true,
+        keep: Vec::new(),
+    };
+    let tier = 1u32;
+    log("lease acquired; running git repack -d --geometric --write-midx".to_string());
+    let t = Instant::now();
+    let result = match handle.local().repack(repack_opts).await {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = lease.release().await;
+            return Err(e.into());
+        }
+    };
+    log(format!(
+        "repack done in {:.1}s: {} new pack(s), {} removed",
+        t.elapsed().as_secs_f64(),
+        result.new_packs.len(),
+        result.removed.len()
+    ));
+
+    // Geometric: the new pack(s) supersede exactly what git removed — of the packs the manifest
+    // lists (a stale local file nobody advertises is not a supersede).
+    let live: std::collections::HashSet<String> =
+        manifest.packs.iter().map(|p| p.checksum.clone()).collect();
+    let supersedes: Vec<gix_hash::ObjectId> = result
+        .removed
+        .iter()
+        .copied()
+        .filter(|c| live.contains(&c.to_hex().to_string()))
+        .collect();
+    let superseded = supersedes.len();
+    let mut supersedes_left = Some(supersedes);
+    let mut packs = Vec::new();
+    let mut first_err = None;
+    for p in &result.new_packs {
+        let hex = p.checksum.to_hex().to_string();
+        let size = p.pack_size;
+        match handle
+            .publish_compact(p.clone(), supersedes_left.take().unwrap_or_default(), tier)
+            .await
+        {
+            Ok(seq) => {
+                log(format!("published pack {hex} ({size} bytes) as seq {seq}"));
+                packs.push(hex);
+            }
+            Err(e) => {
+                log(format!("publish_compact failed for {hex}: {e}"));
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    if let Err(e) = lease.release().await {
+        log(format!("lease release failed: {e}"));
+    }
+    if let Some(e) = first_err {
+        return Err(e.into());
+    }
+    Ok(CompactOutcome::Published {
+        tier,
+        packs,
+        superseded,
+    })
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::fold_due;
+
+    #[test]
+    fn one_fresh_pack_never_triggers_folding_however_large() {
+        let cfg = gitcask_config::Config::default(); // trigger_packs 16, trigger_bytes 1 GiB
+        assert!(
+            !fold_due(1, 11_891_739_367, &cfg),
+            "a single 11.9 GB import pack folds into itself"
+        );
+        assert!(!fold_due(0, 0, &cfg));
+        assert!(
+            fold_due(2, 2 << 30, &cfg),
+            "two packs over the byte trigger"
+        );
+        assert!(fold_due(16, 1024, &cfg), "count trigger");
+        assert!(!fold_due(15, 1024, &cfg));
+    }
+}

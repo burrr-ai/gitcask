@@ -1,0 +1,117 @@
+# compose file for gitcask local dev (podman compose): rustfs (S3-compatible) + bucket creation.
+#
+# Usage:
+#   docker compose up --build -d          # rustfs + public gitcask
+#   podman compose up -d rustfs           # start only the development store
+#   podman compose run --rm create-bucket # create the gitcask-test bucket
+#   just dev-store                        # convenience wrapper
+#
+# rustfs exposes the S3 API on :19000 and the console on :19001 by default
+# (override with GITCASK_RUSTFS_PORT / GITCASK_RUSTFS_CONSOLE_PORT).
+# Credentials are fixed for local dev — do not use in production.
+
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    ports:
+      - "${GITCASK_RUSTFS_PORT:-19000}:9000"
+      - "${GITCASK_RUSTFS_CONSOLE_PORT:-19001}:9001"
+    environment:
+      RUSTFS_ACCESS_KEY: gitcask-dev
+      RUSTFS_SECRET_KEY: gitcask-dev-secret
+      RUSTFS_ADDRESS: "0.0.0.0:9000"
+      RUSTFS_CONSOLE_ADDRESS: "0.0.0.0:9001"
+      RUSTFS_VOLUMES: /data
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: create the gitcask-test bucket after rustfs is healthy.
+  create-bucket:
+    image: amazon/aws-cli:latest
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: gitcask-dev
+      AWS_SECRET_ACCESS_KEY: gitcask-dev-secret
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: []
+    command: >
+      sh -c "
+        aws --endpoint-url http://rustfs:9000 s3 mb s3://gitcask-test 2>/dev/null || true &&
+        aws --endpoint-url http://rustfs:9000 s3 ls
+      "
+    restart: "no"
+
+  # One-shot: generate the local-demo Ed25519 pair once. Public and private
+  # material live in separate volumes so the server can mount only the public half.
+  create-keys:
+    image: gitcask:local
+    depends_on:
+      create-bucket:
+        condition: service_completed_successfully
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ ! -s /keys/public/gitcask-public.pem ] || [ ! -s /keys/private/gitcask-private.pem ]; then
+          rm -f /keys/public/gitcask-public.pem /keys/private/gitcask-private.pem
+          gitcask token keygen --public-key /keys/public/gitcask-public.pem --private-key /keys/private/gitcask-private.pem
+        fi
+    volumes:
+      - gitcask-auth-public:/keys/public
+      - gitcask-auth-private:/keys/private
+    restart: "no"
+
+  gitcask:
+    image: gitcask:local
+    build:
+      context: .
+      dockerfile: Containerfile
+    depends_on:
+      create-bucket:
+        condition: service_completed_successfully
+      create-keys:
+        condition: service_completed_successfully
+    entrypoint: ["tini", "--", "gitcask-server"]
+    command: ["--config", "/etc/gitcask/gitcask.standalone.toml"]
+    environment:
+      AWS_ACCESS_KEY_ID: gitcask-dev
+      AWS_SECRET_ACCESS_KEY: gitcask-dev-secret
+      GITCASK__SERVER__LISTEN: "0.0.0.0:8080"
+      GITCASK__AUTH__JWT__PUBLIC_KEY: "/run/gitcask-auth/gitcask-public.pem"
+      GITCASK__STORE__S3__ENDPOINT: "http://rustfs:9000"
+    ports:
+      - "8080:8080"
+    volumes:
+      - gitcask-cache:/var/lib/gitcask
+      - gitcask-auth-public:/run/gitcask-auth:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # Offline helper. It mounts only the generated demo private key; the server does not.
+  # `docker compose run --rm token --config /etc/gitcask/gitcask.standalone.toml token mint ...`
+  token:
+    image: gitcask:local
+    profiles: ["tools"]
+    depends_on:
+      create-keys:
+        condition: service_completed_successfully
+    user: "0:0"
+    entrypoint: ["gitcask"]
+    volumes:
+      - gitcask-auth-private:/run/secrets:ro
+
+volumes:
+  rustfs-data:
+  gitcask-cache:
+  gitcask-auth-public:
+  gitcask-auth-private:

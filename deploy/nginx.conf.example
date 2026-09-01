@@ -1,0 +1,155 @@
+# deploy/nginx.conf.example — the front-proxy contract for gitcask.
+#
+# The proxy terminates public TLS, rate-limits, and optionally caches immutable bytes.
+# gitcask itself verifies the client's Ed25519 JWT from Authorization; nginx preserves it.
+#
+# It also demonstrates **byte offload with a disk cache (`X-Accel-Redirect`)**: LFS objects are
+#      big, immutable and content-addressed. With this config gitcask still
+#      checks JWT scopes, existence, validators and 304s, but answers the *bytes* with an
+#      internal redirect; nginx fetches the object from the bucket itself (S3 or GCS),
+#      slices ranges, and keeps it on local disk. The second download is served from the
+#      edge's disk.
+#
+# The gitcask request contract is:
+#
+#   nginx → gitcask    Authorization: Basic … | Bearer …              (client credential)
+#                     X-Gitcask-Capabilities: accel-redirect          (optional byte offload)
+#   gitcask → nginx    200 + X-Accel-Redirect: /_store/
+#                     X-Gitcask-Store-Url:            https://… (the object; S3: presigned, GCS: plain)
+#                     X-Gitcask-Store-Authorization:  Bearer … (GCS only; S3 URLs are self-credentialed)
+#                     X-Gitcask-Store-Key:            <bucket key, percent-encoded> (the cache key)
+#                     X-Gitcask-Etag:                 "<gitcask's strong validator>"
+#                     + Content-Type, Cache-Control (immutable), Accept-Ranges
+#
+# Set `server.accel_redirect = true` in gitcask.toml **only** on hosts reached through
+# this nginx: the accel answer carries a store credential. nginx below overwrites every
+# X-Gitcask-Capabilities input so clients cannot forge byte-offload support.
+#
+# Needs nginx with ngx_http_slice_module (included in nginx.org packages and
+# Debian/Ubuntu `nginx-full`; on nixpkgs: `nginx.override { withSlice = true; }`).
+# Test the rendered file with `nginx -t -c $PWD/deploy/nginx.conf.example` after filling in
+# the CHANGEME values.
+
+worker_processes auto;
+events { worker_connections 4096; }
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+    sendfile      on;
+    tcp_nopush    on;
+
+    # ---- gitcask upstream(s) -------------------------------------------------------
+    # One box: one upstream. Several boxes: keep one upstream per group of repositories
+    # and route with `location ~ ^/acme/monorepo([./?]|$)` blocks below (the repo prefix
+    # is the routing key; `.git`, `/api` and LFS all live under it).
+    upstream gitcask {
+        server 127.0.0.1:8080;          # gitcask serves HTTP/1.1 + h2c
+        keepalive 64;
+    }
+
+    # ---- caches -----------------------------------------------------------------------
+    # store: immutable bucket bytes by object key + slice; size it to your disk.
+    proxy_cache_path /var/cache/nginx/gitcask-store levels=1:2 keys_zone=gitcask_store:512m inactive=30d max_size=500g use_temp_path=off;
+
+    # Fetching from the bucket by a URL gitcask hands us needs a resolver for `proxy_pass $var`.
+    resolver 1.1.1.1 8.8.8.8 valid=300s ipv6=off;
+    resolver_timeout 5s;
+
+    server {
+        listen 443 ssl;
+        listen [::]:443 ssl;
+        http2 on;
+        server_name git.example.com;                                  # CHANGEME
+
+        ssl_certificate     /etc/letsencrypt/live/git.example.com/fullchain.pem;   # CHANGEME
+        ssl_certificate_key /etc/letsencrypt/live/git.example.com/privkey.pem;     # CHANGEME
+        ssl_protocols TLSv1.2 TLSv1.3;
+
+        # git pushes and LFS uploads are big and streamed; never buffer them to disk here.
+        client_max_body_size 0;
+        proxy_request_buffering off;
+        proxy_http_version 1.1;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+
+        # ---- open health routes ---------------------------------------------------------
+        location ~ ^/(healthz|readyz)$ { proxy_pass http://gitcask; proxy_set_header Host $host; }
+
+        # ---- everything else: repositories, API, git, LFS ------------------------------
+        location / {
+            proxy_pass http://gitcask;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Gitcask-Capabilities "accel-redirect";
+            proxy_set_header Connection "";
+            proxy_buffering off;               # git and SSE are streams
+        }
+
+        # ---- X-Accel-Redirect target: the bucket, cached on disk --------------------------
+        # Reached only through gitcask's answer (`internal`), after it authorized the caller.
+        location /_store/ {
+            internal;
+            # gitcask's answer headers are the MAIN request's upstream headers. The bucket fetches
+            # below run as `slice` SUBREQUESTS where $upstream_http_* is empty, so capture what we
+            # need now, in the parent's rewrite phase.
+            set $store_url  $upstream_http_x_gitcask_store_url;
+            set $store_auth $upstream_http_x_gitcask_store_authorization;
+            set $store_key  $upstream_http_x_gitcask_store_key;
+            set $gitcask_etag $upstream_http_x_gitcask_etag;
+
+            # Range requests are sliced into 64 MiB pieces so a resumed 30 GB download hits the cache.
+            # Works for S3 presigned URLs too: `Range` is not a signed header.
+            slice 64m;
+            proxy_pass $store_url;
+            proxy_set_header Range $slice_range;
+            proxy_set_header Authorization $store_auth;      # GCS: gitcask's bearer. S3: empty (presigned URL).
+            proxy_set_header Host $proxy_host;
+            proxy_set_header Cookie "";
+            proxy_set_header Connection "";
+            proxy_set_header X-Gitcask-Capabilities "";
+            # Conditionals were decided by gitcask against ITS validator (a 304 happens before the
+            # redirect); the bucket must never see them (its ETag is a different value).
+            proxy_set_header If-Range "";  proxy_set_header If-None-Match ""; proxy_set_header If-Match "";
+            proxy_set_header If-Modified-Since ""; proxy_set_header If-Unmodified-Since "";
+
+            proxy_buffering on;                 # proxy_cache needs it; bytes leave via sendfile
+            proxy_max_temp_file_size 0;
+            proxy_cache gitcask_store;
+            proxy_cache_key "$store_key$slice_range";       # the object, not the (changing, presigned) URL
+            proxy_cache_valid 200 206 30d;
+            proxy_cache_lock on; proxy_cache_lock_timeout 120s; proxy_cache_lock_age 120s;
+            proxy_cache_use_stale updating error timeout;
+            proxy_ignore_headers Cache-Control Expires Set-Cookie;
+
+            # One Cache-Control and one validator set, gitcask's: nginx carries the accel answer's
+            # Cache-Control/Content-Type/Accept-Ranges over the internal redirect; hide the bucket's.
+            proxy_hide_header Cache-Control; proxy_hide_header Expires;
+            proxy_hide_header ETag; proxy_hide_header Last-Modified;
+            add_header ETag $gitcask_etag always;            # the range filter evaluates If-Range against it → 206
+            proxy_hide_header x-goog-hash; proxy_hide_header x-goog-generation; proxy_hide_header x-goog-metageneration;
+            proxy_hide_header x-goog-stored-content-length; proxy_hide_header x-goog-stored-content-encoding;
+            proxy_hide_header x-goog-storage-class; proxy_hide_header x-goog-component-count; proxy_hide_header x-goog-crc32c;
+            proxy_hide_header x-amz-request-id; proxy_hide_header x-amz-id-2; proxy_hide_header x-amz-server-side-encryption;
+            proxy_hide_header x-amz-version-id; proxy_hide_header alt-svc;
+            add_header X-Cache $upstream_cache_status;
+
+            # The bucket refusing gitcask's credential is our fault, not the client's.
+            proxy_intercept_errors on;
+            error_page 401 403 = @store_denied;
+        }
+        location @store_denied {
+            internal;
+            default_type text/plain;
+            return 502 "gitcask-edge: the bucket rejected the credential gitcask attached to its X-Accel-Redirect answer (X-Gitcask-Store-Authorization missing/expired, or the presigned URL expired).\n";
+        }
+    }
+
+    server {
+        listen 80;
+        listen [::]:80;
+        server_name git.example.com;                                  # CHANGEME
+        return 301 https://$host$request_uri;
+    }
+}

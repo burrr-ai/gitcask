@@ -1,0 +1,55 @@
+name: CI
+
+# Runs `just ci` plus the rustfs smoke test — the same tiers contributors run locally.
+# The tier definitions live in the justfile, never duplicated here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: 1.97.1
+
+jobs:
+  build-test:
+    name: just ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # prost-build does not vendor protoc; without it the proto crate fails with NotFound.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # RUSTUP_TOOLCHAIN mirrors rust-toolchain.toml so hosted runners cannot inherit another pin.
+      - name: Install the pinned Rust toolchain
+        run: rustup show && cargo --version && git --version
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - run: just ci
+
+  smoke:
+    name: rustfs smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install the pinned Rust toolchain
+        run: rustup show && cargo --version && git --version
+      - uses: Swatinem/rust-cache@v2
+      - name: Start rustfs and create the test bucket
+        run: |
+          docker compose up -d --wait rustfs
+          docker compose run --rm create-bucket
+      - run: scripts/smoke.sh . 8090

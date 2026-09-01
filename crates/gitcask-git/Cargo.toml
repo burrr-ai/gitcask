@@ -1,0 +1,42 @@
+[package]
+name = "gitcask-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gitcask-proto.workspace = true
+gitcask-config.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+futures.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+serde.workspace = true
+gix.workspace = true
+gix-pack.workspace = true
+gix-hash.workspace = true
+gix-object.workspace = true
+gix-packetline.workspace = true
+gix-ref.workspace = true
+gix-traverse.workspace = true
+uuid.workspace = true
+gix-tempfile.workspace = true
+gix-lock.workspace = true
+gix-date.workspace = true
+gix-actor.workspace = true
+gix-hashtable.workspace = true
+gix-validate.workspace = true
+hex.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+libc.workspace = true
+flate2.workspace = true
+
+[lints]
+workspace = true

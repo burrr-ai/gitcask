@@ -1,0 +1,6 @@
+# Patches preserve upstream indentation and mail trailers verbatim.
+docs/patches/*.patch -whitespace
+# The verbatim source article uses Markdown's two-space hard line breaks.
+docs/reference/*.md whitespace=-blank-at-eol
+# Generated upstream bundle; review by pinned version and SHA-256 in the adjacent README.
+crates/gitcask-server/assets/scalar-api-reference-*.js binary

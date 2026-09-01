@@ -1,0 +1,51 @@
+# gitcask.standalone.toml — one process, one config, and one bucket.
+#
+#   gitcask-server --config gitcask.standalone.toml
+#   → http://gitcask.localhost:8080/
+#
+# gitcask verifies short-lived Ed25519 JWTs and serves the JSON API, smart HTTP,
+# and LFS bytes from the bucket below. Generate the referenced local key pair with
+# `gitcask token keygen`; compose does this once in separate public/private volumes.
+# An edge that wants to take work over announces it per request with
+# `X-Gitcask-Capabilities: …` (`accel-redirect`, honoured only when
+# `server.accel_redirect = true`; see deploy/nginx.conf.example); hit directly,
+# gitcask streams every byte itself.
+#
+# Prerequisites on this machine: `git` and an S3-compatible bucket.
+# `just dev-store` starts rustfs in a container for local play.
+# Every key not set here keeps the default documented in gitcask.example.toml.
+
+[server]
+listen = "127.0.0.1:8080"
+public_url = "http://gitcask.localhost:8080"    # PORT rewrites the port
+auto_create_on_push = true                     # local-play convenience; production defaults to explicit creation
+roles = []                                     # empty = every role: serve, maintain (checkpoints, compaction), events
+auth_mode = "jwt"
+
+[auth.jwt]
+public_key = "gitcask-public.pem"
+issuer = "gitcask-local"
+audience = "gitcask"
+leeway = "60s"
+
+[store]
+# The one durable thing; every host pointed at it serves the same repositories.
+# This shape: rustfs (S3-compatible) in a container, started by `just dev-store` (compose.yaml;
+# bucket gitcask-test, keys gitcask-dev / gitcask-dev-secret). Any S3 (AWS, MinIO, R2, Ceph…) is the
+# same: set endpoint/region, point the key envs at your credentials.
+backend = "s3"
+bucket = "gitcask-test"
+prefix = ""
+max_retries = 4                    # transient failures; each jittered delay is capped at 2s
+[store.s3]
+endpoint = "http://127.0.0.1:19000"
+region = "us-east-1"
+access_key_env = "AWS_ACCESS_KEY_ID"       # compose.yaml fixes gitcask-dev / gitcask-dev-secret for rustfs
+secret_key_env = "AWS_SECRET_ACCESS_KEY"
+force_path_style = true
+
+[cache]
+dir = "/tmp/gitcask"               # materialized repositories; wiped = warmth lost, nothing else
+
+[telemetry]
+log_format = "pretty"

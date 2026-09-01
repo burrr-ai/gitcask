@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose a change within gitcask's headless Git-backend scope
+title: "proposal: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What repository-state operation or self-hosting need is missing?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest API, protocol, or operational change that solves it.
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Product-boundary fit
+      description: Explain which GOAL.md acceptance item this serves and why it belongs in core rather than the calling platform.
+    validations:
+      required: true
+  - type: textarea
+    id: cost
+    attributes:
+      label: Object-store and runtime cost
+      description: Note expected bucket round trips, LIST operations, durable state, and long-running work.
+    validations:
+      required: true

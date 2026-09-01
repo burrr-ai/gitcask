@@ -1,0 +1,46 @@
+[package]
+name = "gitcask-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "gitcask"
+
+[lib]
+name = "gitcask_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gitcask"
+path = "src/bin/gitcask.rs"
+
+[[bin]]
+name = "gitcask-server"
+path = "src/bin/gitcask-server.rs"
+
+[dependencies]
+gitcask-proto.workspace = true
+gitcask-store.workspace = true
+gitcask-config.workspace = true
+gitcask-git.workspace = true
+gitcask-wal.workspace = true
+gitcask-server.workspace = true
+gix-hash.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+clap.workspace = true
+mimalloc.workspace = true
+humantime.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+gitcask-store = { workspace = true, features = ["testing"] }
+
+[lints]
+workspace = true
