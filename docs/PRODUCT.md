@@ -74,7 +74,7 @@ the core side; `PUT /repos/{o}/{r}/pulls/{n}/merge` (approvals, checks, policy) 
 | Read API (refs/resolve/tree/blob/commits/commit/compare) | ● | |
 | Write API (branches/tags, archive, batch commits, merge) | ● | |
 | Repository create/delete | ● | |
-| JWT verification, repository scopes, offline token CLI (§6) | ● | |
+| JWT verification, token introspection, repository scopes, offline token CLI (§6) | ● | |
 | Event webhooks, metrics, `/healthz`, size limits | ● | |
 | Migration tooling | ● | |
 | Multi-tenancy (tenant isolation, bucket placement) | | ● |
@@ -119,7 +119,7 @@ The line along which things *can* separate is **"does it read packs (git objects
 
 | Level | How | Why |
 |---|---|---|
-| **Process split** | none | Public-key verification and the handlers' own permission checks live in one process, so there is no duplicated path-to-permission table and no trusted header to forge. |
+| **Process split** | none | JWT verification or issuer introspection and the handlers' own permission checks live in one process, so there is no duplicated path-to-permission table and no trusted header to forge. |
 | **Logical split** | roles (`serve` / `maintain` / `events`) | Want pure storage? Point only `serve` hosts at the bucket. The code boundary is `crates/gitcask-server/src/web/`. |
 | **Physical split** | static bytes go to the edge | Raw blobs and archives are immutable and servable without packs — `X-Accel-Redirect` (D23). The real split point for a SaaS whose cost is bandwidth. |
 
@@ -143,8 +143,11 @@ takes the same token as a Bearer header. The platform signs `sub` (an opaque pri
 from `[auth.jwt]`. There is no HS256, no issuance endpoint, no callback, no static token list. Self-hosters
 and CI use the offline `gitcask token keygen|mint` commands.
 
-The server's entire authentication state is therefore one public key. Revocation is handled by short expiry
-and issuer key rotation; gitcask has no user DB, no sessions, no revocation list, no usage history.
+JWT verification holds only public keys; revocation uses short expiry and issuer key rotation.
+Introspection keeps identity outside gitcask too: the platform owns its opaque tokens and can revoke them
+instantly, with gitcask observing revocation when its bounded answer cache expires (or on every request with
+zero positive TTL).
+gitcask has no user DB, no sessions, no revocation list, no usage history.
 Deployments that already have a trusted IdP proxy can choose `forwarded` mode instead.
 
 ## 7. License
@@ -165,7 +168,7 @@ operations all live on the closed side, which is a natural moat regardless of th
 | Item | Status |
 |---|---|
 | Upstream correctness fixes since the fork (empty-pack tip verification; warnings gate blind under forced colour) | done (T37, PR #2). Upstream is reviewed monthly for such fixes; they are re-implemented, not cherry-picked |
-| Opaque-token authentication (`auth_mode = "introspect"`, RFC 7662) for platforms without a JWT signer | in progress (T38) |
+| Opaque-token authentication (`auth_mode = "introspect"`, RFC 7662) for platforms without a JWT signer | merged-pending (T38) |
 | Ref-level push restrictions (protected branches, fast-forward only) | open — needed before agents get write tokens; the platform cannot enforce this after the fact because the push has already landed |
 | git transport, read API, repository CRUD, event webhooks, metrics, size limits | done |
 | Write API — branch/tag CRUD, archive | done (T28): reuses the WAL publish path, `expected_old_oid` CAS, immutable archives |

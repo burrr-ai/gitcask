@@ -61,10 +61,15 @@ decisions numbered in §4 here); this file keeps the rules.
   client: SSE envelope for API clients, sideband band-2 lines for git. "Cloning into… and then nothing" is a bug.
 
 ### 1.3 Security contract (`Config::validate` fails closed)
-- Three auth modes (`server.auth_mode`): **`none`** (everyone is `anon` with write and admin — `validate` refuses
-  unless `server.listen` is loopback), **`jwt`** (the normal standalone/public path), and **`forwarded`**.
+- Four auth modes (`server.auth_mode`): **`none`** (everyone is `anon` with write and admin — `validate` refuses
+  unless `server.listen` is loopback), **`jwt`**, **`introspect`**, and **`forwarded`**.
   JWT mode accepts EdDSA tokens from a Git Basic password or API Bearer header, verifies `[auth.jwt]` public-key
-  PEM or cached JWKS plus issuer/audience/times, and applies `<owner>/<repo>:read|write|admin` scopes. Scope
+  PEM or cached JWKS plus issuer/audience/times, and applies `<owner>/<repo>:read|write|admin` scopes.
+  Introspect mode sends the same Basic password or Bearer credential to `[auth.introspect].url` as JSON
+  `{"token":"…"}`, with a service bearer secret read from `secret_env` at startup. The issuer returns
+  `active`, opaque `principal`, repository `scopes`, and optional `ttl` seconds; it owns tokens and revocation.
+  Both modes share permission checks. Introspection answers are bounded, SHA-256-keyed process caches;
+  service failures return 503 + `Retry-After: 5`, never 401 or stale grants after expiry. Scope
   misses are 404; missing/invalid credentials are 401 with `WWW-Authenticate: Basic realm="gitcask"`. Client
   `X-Gitcask-Principal`/`-Write`/`-Admin` headers are ignored. In forwarded mode the authenticating proxy supplies
   `X-Gitcask-Principal`; `X-Gitcask-Write: 1` and `X-Gitcask-Admin: 1` grant those permissions. If
@@ -283,7 +288,7 @@ decision in §4 — or the PR is; never "fix later".
   stores no identities, sessions, revocations or usage history, strips every client `X-Gitcask-*` header, and
   streams all bodies except the bounded LFS batch JSON. It shares `gitcask.toml` with the server. D9's one-binary
   rule applies to repository roles; the authentication boundary is intentionally a second process.
-- **D46** **gitcask verifies asymmetric tokens itself; issuance and identity stay outside** (2026-09-01).
+- **D46** **gitcask verifies asymmetric tokens itself; issuance and identity stay outside** (2026-09-01; extended by D47).
   `server.auth_mode` is `none` | `jwt` | `forwarded`; `jwt` is the one-process standalone/public path. Only
   EdDSA (Ed25519) is accepted. The issuer keeps the private key; gitcask has a public-key PEM or cached JWKS,
   refreshes JWKS only on `kid` miss, and retains the last successful set on refresh failure. Claims are opaque
@@ -295,6 +300,22 @@ decision in §4 — or the PR is; never "fix later".
   `forwarded` remains only for deployments that already have a trusted IdP proxy. gitcask stores no users,
   sessions, revocations, or token-use history. An edge terminates TLS and may offload bytes, but is not required
   for authentication.
+- **D47** **Opaque tokens are verified by issuer introspection** (2026-09-20; extends D46).
+  `server.auth_mode = "introspect"` uses the RFC 7662 active-token model with gitcask's explicit JSON
+  contract: POST `{"token":"…"}` to an HTTPS (or loopback HTTP) URL, authorized with a service Bearer secret
+  named by `auth.introspect.secret_env`. A 200 answer carries `active`, non-empty `principal`, the same
+  repository `scopes` as JWT, and optional `ttl` seconds. JWT and introspection share Basic/Bearer extraction
+  and the handlers' permission path; no identity or token-issuance service enters gitcask.
+  A strictly bounded 10,000-entry FIFO cache uses SHA-256 token digests, never credentials; positive answers
+  live `min(ttl, cache_ttl)` (default 30 s, maximum 10 min), inactive/invalid token answers use
+  `negative_cache_ttl` (default 3 s). Concurrent misses share one call, including failure; the in-flight table
+  is also capped at 10,000 and cancellation releases waiters. FIFO gives constant-time eviction without
+  another cache dependency. These answers are warmth: restarting loses only latency, never authoritative
+  identity or revocation state. Platform revocation is observed after the cached grant expires; zero TTL
+  disables positive caching. Non-200, malformed JSON, oversized (>64 KiB) responses and transport errors
+  are uncached 503 + `Retry-After: 5`; 401/403 from the issuer warns that the service secret was rejected.
+  The request timeout defaults to 2 s and is capped at 10 s. The bounded cache and flight table are the only
+  new state; no bucket requests are added. `forwarded` remains for trusted IdP-proxy deployments.
 
 Decision identifiers are stable; gaps in the numbering are intentional.
 
@@ -316,7 +337,7 @@ Decision identifiers are stable; gaps in the numbering are intentional.
 - **Correct is not sufficient.** Every protocol change (publish, sync, leases, checkpoints) is also
   judged on critical-path round trips against the bucket — read `docs/ROUNDTRIPS.md`, update its budget table, put
   before/after depth in the commit, keep verification on the failure path, assert request budgets in the sim.
-- **Standalone first (D39, D46):** repository features and JWT authentication work by hitting one gitcask process
+- **Standalone first (D39, D46, D47):** repository features and JWT/introspection authentication work by hitting one gitcask process
   directly with no external edge. Bytes are streamed by gitcask. Anything another
   edge takes over is announced per request in `X-Gitcask-Capabilities`; never infer an edge from config, never
   hardcode a hostname in `crates/`.

@@ -28,9 +28,9 @@ comwit is gitcask's first user and the workload that shaped it; the architecture
    all repositories, no listing of the bucket on any path that runs periodically. Packs always fit on the
    instance; there is no remote-pack path.
 4. **gitcask knows nothing about users.** Identity, permissions, the list of repositories and their metadata
-   live in the calling platform's database. gitcask verifies short-lived EdDSA JWTs with a public key/JWKS and
-   applies the token's repository scopes; it never stores users, sessions, revocations, or a signing key. It
-   exposes create/delete for the platform to call.
+   live in the calling platform's database. gitcask verifies EdDSA JWTs with a public key/JWKS or introspects
+   opaque tokens with their issuer, then applies the same repository scopes; it never stores users,
+   sessions, revocations, or a signing key. It exposes create/delete for the platform to call.
    There is no login, no token store, no repository listing.
 5. **All the features a git host needs, and only those**: smart HTTP v0/v2 (ls-refs, fetch with
    filter/shallow/deepen, receive-pack atomic/delete/tags/push-options/report-status-v2), LFS,
@@ -55,7 +55,7 @@ comwit is gitcask's first user and the workload that shaped it; the architecture
 | Push | acknowledged only after the bucket ACKs; one CAS per batch; 5 store requests on the happy path |
 | Consistency | push then fetch anywhere sees it; concurrent pushers: exactly one winner (the simulation suite) |
 | Cost model | a maintainer pass touches only repositories with a pending marker; no periodic LIST of `repos/` anywhere |
-| Security | in `jwt` mode every route but `/healthz` and `/readyz` requires a valid EdDSA token and repo routes require scope; `forwarded` remains available; `none` binds loopback only |
+| Security | in `jwt`/`introspect` modes every route but `/healthz` and `/readyz` requires a valid token and repo routes require scope; introspection-service failures are 503, never grants; `forwarded` remains available; `none` binds loopback only |
 | Transient store errors | 5xx / throttling on any store operation is retried with backoff and never surfaces as a failed push on its own |
 | Data completeness | every object reachable from an advertised ref is in the pack set; `fsck` reports violations |
 

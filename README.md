@@ -10,7 +10,7 @@ It is intended for platforms that create and delete repositories programmaticall
 - **JSON API** — read trees, commits and diffs; commit files, create branches and merge, all without a clone or working directory.
 - **Webhooks** — each ref change is delivered once, from a durable cursor, and can be replayed.
 - **Stateless servers** — every instance can serve every repository. A new instance starts serving refs within a few seconds.
-- **Built-in authentication** — the platform signs a JWT with its own key; gitcask verifies it with the public key. No user database is involved.
+- **Built-in authentication** — gitcask verifies platform JWTs with a public key or introspects opaque tokens with their issuer, then applies repository scopes. No user database is involved.
 
 ## Where it came from
 
@@ -54,6 +54,8 @@ Some things are intentionally left to the calling platform:
 Data can always be taken out: `git clone --mirror` exports a repository (with `git lfs fetch --all` for LFS content), and a consistent copy of the bucket — taken while writes are paused, or via S3 versioning or point-in-time replication — is a complete backup: a fresh deployment pointed at it serves as-is.
 
 ## Running it
+
+Platforms with opaque tokens use `server.auth_mode = "introspect"` and configure their introspection endpoint in [`gitcask.example.toml`](gitcask.example.toml).
 
 ```sh
 # build (needs the Rust version in rust-toolchain.toml, plus protoc)

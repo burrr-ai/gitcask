@@ -39,6 +39,7 @@ right shape. This document is the thinking tool; apply it to every protocol chan
 ## 2. Budgets to defend (happy path, sequential depth → total requests)
 | Operation | Depth | Requests | Where |
 |---|---|---|---|
+| Authentication (introspect mode) | 0 on a cache hit; 1 HTTP request to the introspection URL per cache miss | 0 store requests; ≤ 1 HTTP request per effective cached TTL per token per instance while resident; concurrent misses coalesce. Issuer TTL may shorten `cache_ttl`; inactive answers use `negative_cache_ttl`; evictions and uncached service errors may require another call | `auth/introspect.rs` |
 | Any read (`info/refs`, ls-refs, web refs/resolve) | 1 cond GET (or 0 within `freshness_ttl`) | 1 | `sync.rs::freshness_check` |
 | Cold Refs sync | 1 manifest GET → 1 round (checkpoint refs ∥ log tail segments) | no checkpoint: 1 + tail (2 with one segment); checkpoint: 2 + tail | `registry.rs::open`, `sync.rs` |
 | Push request / publish (`process_batch`) | 1 freshness GET → pack PUT ∥ idx PUT ∥ log PUT (1 round) → manifest CAS (1 round) → best-effort pending-marker PUT | request: 6; already-synced publish: 5 | `publish.rs` |

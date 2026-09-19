@@ -40,6 +40,8 @@ not a substitute for a repository listing.
 
 | Name | Normal | When it moves | Suggested alert starting point |
 |---|---|---|---|
+| `gitcask_auth_introspect_total{outcome}` | `hit` for cached answers; `miss` for uncached verifies (including followers); `active`/`inactive` for upstream token answers | `error` counts unavailable upstream calls; inactive includes invalid principal/scope/TTL answers. Service errors never enter the cache | any sustained `error`; a logged endpoint 401/403 means gitcask's service secret was rejected |
+| `gitcask_auth_introspect_seconds` | upstream calls below `auth.introspect.timeout` | elapsed HTTP request/body/parse time on the single-flight leader, including failures; no token/principal labels | p99 approaching the timeout for 5 minutes |
 | `gitcask_push_refused_total{reason}` | flat outside deploys | `connectivity` = object-closure failure on a new tip, `unpack` = pack parse/index failure, `draining` = a push during serving drain | one `connectivity`/`unpack` immediately; one `draining` outside a deploy window |
 | `gitcask_publish_local_apply_failed_total` | 0 | the manifest CAS succeeded but applying refs locally on that instance failed. The next sync repairs it, but it is the lead on an immediate-visibility regression | on any increase |
 | `gitcask_pending_marker_put_failures_total` | 0 | the push committed but the best-effort marker PUT that wakes the maintainer failed | on any increase; check that repository by hand |
