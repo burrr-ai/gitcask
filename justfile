@@ -95,7 +95,9 @@ warnings:
     # A command substitution that fails does NOT abort under `set -uo pipefail` (no -e), so a
     # workspace that does not compile used to fall through to "no rustc warnings" and exit 0 —
     # the preflight passing on a broken tree. Check the build's status before grepping it.
-    if ! out="$({{t15}} cargo build --workspace --all-targets 2>&1)"; then
+    # Override CARGO_TERM_COLOR=always from CI: ANSI prefixes hide diagnostics from
+    # the anchored greps below. Plain output keeps matching and reporting consistent.
+    if ! out="$({{t15}} cargo build --workspace --all-targets --color never 2>&1)"; then
         printf '%s\n' "$out"
         echo; echo "cargo build failed — fix the errors above"; exit 1
     fi

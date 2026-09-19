@@ -17,6 +17,95 @@ use std::time::{Duration, Instant};
 
 static INSTALL_DELAY_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn empty_pack_push_to_a_missing_object_is_refused_with_connectivity() -> TestResult {
+    empty_pack_push_to_a_missing_object_is_refused(true).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn empty_pack_push_to_a_missing_object_is_refused_without_connectivity() -> TestResult {
+    empty_pack_push_to_a_missing_object_is_refused(false).await
+}
+
+async fn empty_pack_push_to_a_missing_object_is_refused(check_connectivity: bool) -> TestResult {
+    let server =
+        Server::start_with_tweak(|c| c.wal.check_connectivity = check_connectivity).await?;
+    server.put_repo("t", "ghost").await?;
+    let src = TestRepo::synthetic(2, 2)?;
+    git_in(
+        &src,
+        &["push", "-q", &server.repo_url("t", "ghost"), "main"],
+    )?;
+
+    // A ref-only push: one command, a flush, and the exact 32-byte zero-object pack
+    // (version 2 header followed by its SHA-1 checksum).
+    let missing = "b".repeat(40);
+    let cmd = format!(
+        "{} {missing} refs/heads/ghost\0report-status\n",
+        "0".repeat(40)
+    );
+    let mut body = format!("{:04x}{cmd}0000", cmd.len() + 4).into_bytes();
+    body.extend_from_slice(b"PACK\x00\x00\x00\x02\x00\x00\x00\x00");
+    body.extend_from_slice(&[
+        0x02, 0x9d, 0x08, 0x82, 0x3b, 0xd8, 0xa8, 0xea, 0xb5, 0x10, 0xad, 0x6a, 0xc7, 0x5c, 0x82,
+        0x3c, 0xfd, 0x3e, 0xd3, 0x1e,
+    ]);
+    let resp = reqwest::Client::new()
+        .post(format!("{}/t/ghost.git/git-receive-pack", server.base_url))
+        .header("Content-Type", "application/x-git-receive-pack-request")
+        .body(body)
+        .send()
+        .await?;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let report = resp.text().await?;
+    assert!(
+        report.contains("ng refs/heads/ghost"),
+        "check_connectivity={check_connectivity}: {report}"
+    );
+    assert!(
+        report.contains(&format!("missing object {missing}")),
+        "{report}"
+    );
+    assert!(!report.contains("ok refs/heads/ghost"), "{report}");
+    let refs = server
+        .get_text("/t/ghost.git/info/refs?service=git-upload-pack", &[])
+        .await?;
+    assert!(!refs.contains("refs/heads/ghost"), "{refs}");
+    assert_eq!(server.read_log("t", "ghost").await?.len(), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn empty_pack_push_to_an_existing_commit_succeeds() -> TestResult {
+    for check_connectivity in [true, false] {
+        let server =
+            Server::start_with_tweak(|c| c.wal.check_connectivity = check_connectivity).await?;
+        server.put_repo("t", "copy").await?;
+        let src = TestRepo::synthetic(2, 2)?;
+        git_in(&src, &["push", "-q", &server.repo_url("t", "copy"), "main"])?;
+        let clone = tempfile::tempdir()?;
+        git(
+            &["clone", "-q", &server.repo_url("t", "copy"), "."],
+            clone.path(),
+        )?;
+        // The server already has main, so this sends a zero-object pack.
+        git_in(
+            clone.path(),
+            &["push", "-q", "origin", "main:refs/heads/copy"],
+        )?;
+        let head = git_in(clone.path(), &["rev-parse", "main"])?;
+        let refs = server.ls_remote("t", "copy").await?;
+        assert!(
+            refs.contains(&format!("{}\trefs/heads/copy", head.trim())),
+            "check_connectivity={check_connectivity}: {refs}"
+        );
+        let entries = server.read_log("t", "copy").await?;
+        assert_eq!(entries.len(), 2);
+        assert!(entries[1].pack.is_none(), "ref-only push published a pack");
+    }
+    Ok(())
+}
+
 async fn archive_cache_count(server: &Server) -> anyhow::Result<usize> {
     let objects = server
         .store
