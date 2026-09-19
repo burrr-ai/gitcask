@@ -33,6 +33,11 @@ is a WAL in S3; a server is a cache that may be wiped at any time.
 Because of this inversion, everything walgit built for *one big repository* is removed, and everything that
 scales with *repository count* is reworked.
 
+The split has held since the fork. As of 2026-09-13 upstream's stated goal is "fast for monorepos": its
+September work replaced bundle-uri with native packfile-uri delivery of proven static packs, verified
+multi-pack bitmaps and pack-retirement proofs, while its maintainer still lists every repository in the
+bucket each pass. Nothing there moved toward the many-small-repositories workload.
+
 ## 3. Settled decisions
 
 1. **Identity and the permission model live outside gitcask.** comwit judges sessions/permissions and issues
@@ -45,7 +50,10 @@ scales with *repository count* is reworked.
    `PUT /{owner}/{repo}`.
 4. **comwit reads user files via `git clone`** (option A). The repository-browsing JSON API
    (`/{o}/{r}/api/tree|blob|commits…`) is not used yet but is **kept for the next stage**.
-5. **Rust stays; this is a fork, not a rewrite.** Upstream (tobi/walgit) is not tracked.
+5. **Rust stays; this is a fork, not a rewrite.** Upstream (tobi/walgit) is not tracked as git history.
+   Its commits are reviewed about monthly for correctness fixes that also apply here; those are
+   re-implemented against this tree (crate names, receive path and pack lifecycle have diverged too far
+   for cherry-picks) and credited by upstream sha in the commit message.
 6. **The cache disk is node-local SSD (emptyDir).** No tmpfs, no FUSE mounts, no remote pack serving. Packs
    are always downloaded whole.
 7. **LFS is on** (D5). Big files go through LFS; the object cap is 1 GiB.
@@ -116,6 +124,9 @@ The removals were carried out as the scoped tasks listed in §5.
 | 33 publication readiness — five-minute path, SECURITY/CONTRIBUTING/CoC, CI gate fixed | ✅ merged |
 | 34 verify JWTs inside gitcask, drop the gate | ✅ merged — EdDSA public key/JWKS, scopes, Basic/Bearer, offline token CLI, one process |
 | 35 operations runbook (`docs/OPERATIONS.md`) — verified metrics table, symptom-first diagnosis, recovery | ✅ merged |
+| 36 rename repohub → gitcask across crates, config, metrics, headers and docs; relicense MIT → Apache-2.0 with NOTICE | ✅ merged (2026-09-01, public release) |
+| 37 port upstream fixes: verify tips on empty-pack pushes (walgit d5e75caf); un-blind `just warnings` under forced colour (walgit b81b15ae) | ✅ merged (PR #2) |
+| 38 `auth_mode = "introspect"` — opaque tokens verified by RFC 7662 token introspection, bounded in-memory cache, 503 on introspection outage | 🔄 in progress |
 | local smoke (`scripts/smoke.sh`, rustfs) | ✅ 51/51 — re-run on every merge |
 | `AGENTS.md` / `GOAL.md` / `README.md` rewrites | ✅ |
 

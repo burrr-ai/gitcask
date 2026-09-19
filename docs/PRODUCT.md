@@ -29,6 +29,7 @@ answers, all bad:
 |---|---|
 | Delegate to users' GitHub accounts (OAuth) | Users must have a GitHub account; ownership and rate limits sit in someone else's hands |
 | Self-host Gitea/GitLab | Cost scales with repository count — exactly what broke for comwit |
+| Buy hosted headless git (code.storage, used by Lovable and Bolt as of 2026-09) | Proprietary, hosted only; hot storage priced at $0.005/GB/hour (≈ $3.6/GB/month) plus egress, because its architecture keeps replicated repositories on server disks and uses object storage only as a cold tier. User code lives on someone else's infrastructure |
 | Build it yourself | Collapses the moment history, branches or LFS show up |
 
 gitcask has one weapon: **cost scales with pushes, not with the number of repositories** (D40's pending
@@ -159,10 +160,13 @@ AGPL or BUSL would fence off cloud vendors, but early on the risk of not being a
 being copied. And the engine alone cannot be sold as a SaaS — multi-tenancy, provisioning, billing and
 operations all live on the closed side, which is a natural moat regardless of the license.
 
-## 8. Current gaps (2026-09-01)
+## 8. Current gaps (2026-09-20)
 
 | Item | Status |
 |---|---|
+| Upstream correctness fixes since the fork (empty-pack tip verification; warnings gate blind under forced colour) | done (T37, PR #2). Upstream is reviewed monthly for such fixes; they are re-implemented, not cherry-picked |
+| Opaque-token authentication (`auth_mode = "introspect"`, RFC 7662) for platforms without a JWT signer | in progress (T38) |
+| Ref-level push restrictions (protected branches, fast-forward only) | open — needed before agents get write tokens; the platform cannot enforce this after the fact because the push has already landed |
 | git transport, read API, repository CRUD, event webhooks, metrics, size limits | done |
 | Write API — branch/tag CRUD, archive | done (T28): reuses the WAL publish path, `expected_old_oid` CAS, immutable archives |
 | Write API — batch file commits, merge | done (T32): one request = one commit = one pack; conflicts are 409 + the conflicting paths |
