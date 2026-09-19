@@ -1,6 +1,9 @@
-//! Stateless request authentication: local Ed25519 JWT verification or trusted
-//! forwarded headers. Identity remains opaque; repository scopes are carried by
-//! the token and checked by the handlers' existing read/write/admin gates.
+//! Request authentication: local Ed25519 JWT verification, token introspection,
+//! or trusted forwarded headers. Identity remains opaque; repository scopes are
+//! checked by the handlers' existing read/write/admin gates.
+
+mod introspect;
+use introspect::IntrospectClient;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -178,6 +181,7 @@ enum Backend {
     None,
     Forwarded { forward_secret: Option<String> },
     Jwt(Box<JwtVerifier>),
+    Introspect(IntrospectClient),
 }
 
 /// Pluggable authenticator backed by [`gitcask_config::AuthMode`].
@@ -195,6 +199,7 @@ impl Authenticator {
                     .filter(|value| !value.is_empty()),
             },
             AuthMode::Jwt => Backend::Jwt(Box::new(JwtVerifier::new(&cfg.auth.jwt).await?)),
+            AuthMode::Introspect => Backend::Introspect(IntrospectClient::new(&cfg.auth.introspect)?),
         };
         Ok(Arc::new(Self { backend }))
     }
@@ -218,6 +223,10 @@ impl Authenticator {
                     AuthError::Unauthorized
                 })?
             }
+            Backend::Introspect(client) => {
+                let credential = client_credential(headers).ok_or(AuthError::Unauthorized)?;
+                client.verify(&credential).await?
+            }
         };
         tracing::Span::current().record("principal", principal.name.as_str());
         Ok(principal)
@@ -231,7 +240,7 @@ impl Authenticator {
         required: Permission,
     ) -> Result<Principal, AuthError> {
         let mut principal = self.authenticate(headers).await?;
-        if matches!(&self.backend, Backend::Jwt(_)) {
+        if matches!(&self.backend, Backend::Jwt(_) | Backend::Introspect(_)) {
             let repository = Repository::new(owner, repo).ok_or(AuthError::NotFound)?;
             let granted = principal
                 .permission_for(&repository)
@@ -731,6 +740,7 @@ pub enum AuthError {
     Unauthorized,
     Forbidden,
     NotFound,
+    IntrospectionUnavailable,
 }
 
 #[cfg(test)]

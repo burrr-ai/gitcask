@@ -12,6 +12,7 @@ pub enum ApiError {
     BadRequest(String),
     Unauthorized,
     Forbidden,
+    IntrospectionUnavailable,
     Conflict(String),
     PayloadTooLarge,
     UnsupportedMediaType(String),
@@ -27,6 +28,7 @@ impl ApiError {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden => StatusCode::FORBIDDEN,
+            ApiError::IntrospectionUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::UnsupportedMediaType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -47,10 +49,6 @@ impl ApiError {
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
-
-    fn store_unavailable(&self) -> bool {
-        self.status() == StatusCode::SERVICE_UNAVAILABLE
-    }
 }
 
 impl ApiError {
@@ -61,6 +59,7 @@ impl ApiError {
             ApiError::BadRequest(m) => format!("bad request: {m}"),
             ApiError::Unauthorized => "unauthorized".to_string(),
             ApiError::Forbidden => "forbidden".to_string(),
+            ApiError::IntrospectionUnavailable => "introspection service unavailable".to_string(),
             ApiError::Conflict(m) => format!("conflict: {m}"),
             ApiError::PayloadTooLarge => "payload too large".to_string(),
             ApiError::UnsupportedMediaType(m) => format!("unsupported media type: {m}"),
@@ -87,22 +86,28 @@ impl IntoResponse for ApiError {
         if status.is_server_error() {
             tracing::warn!(status = status.as_u16(), error = %msg, "request failed");
         }
-        let mut resp = if self.store_unavailable() {
+        let mut resp = if status == StatusCode::SERVICE_UNAVAILABLE {
             (
                 status,
                 [(axum::http::header::CONTENT_TYPE, "application/json")],
-                r#"{"error":"store_unavailable","retryable":true}"#,
+                if matches!(self, Self::IntrospectionUnavailable) {
+                    r#"{"error":"introspection_unavailable","retryable":true}"#
+                } else {
+                    r#"{"error":"store_unavailable","retryable":true}"#
+                },
             )
                 .into_response()
         } else {
             (status, msg).into_response()
         };
-        // 503s are transient by contract (a store deadline or a warming copy):
+        // 503s are transient by contract (store or authentication service):
         // say when to come back.
         if status == StatusCode::SERVICE_UNAVAILABLE {
             resp.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
-                axum::http::HeaderValue::from_static("15"),
+                axum::http::HeaderValue::from_static(
+                    if matches!(self, Self::IntrospectionUnavailable) { "5" } else { "15" },
+                ),
             );
         }
         if status == StatusCode::UNAUTHORIZED {
@@ -133,6 +138,7 @@ impl From<crate::auth::AuthError> for ApiError {
             crate::auth::AuthError::Unauthorized => ApiError::Unauthorized,
             crate::auth::AuthError::Forbidden => ApiError::Forbidden,
             crate::auth::AuthError::NotFound => ApiError::NotFound("repository".into()),
+            crate::auth::AuthError::IntrospectionUnavailable => ApiError::IntrospectionUnavailable,
         }
     }
 }
@@ -183,6 +189,16 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("Basic realm=\"gitcask\"")
         );
+    }
+
+    #[tokio::test]
+    async fn introspection_unavailable_is_retryable_without_a_credential_challenge() {
+        let response = ApiError::from(crate::auth::AuthError::IntrospectionUnavailable).into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "5");
+        assert!(!response.headers().contains_key("www-authenticate"));
+        let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], br#"{"error":"introspection_unavailable","retryable":true}"#);
     }
 
     #[test]

@@ -31,6 +31,21 @@ pub struct Config {
 #[serde(deny_unknown_fields, default)]
 pub struct AuthConfig {
     pub jwt: JwtConfig,
+    pub introspect: IntrospectConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct IntrospectConfig {
+    pub url: String,
+    /// Environment variable containing the service bearer secret, read at startup.
+    pub secret_env: String,
+    #[serde(with = "humantime_serde")]
+    pub cache_ttl: Duration,
+    #[serde(with = "humantime_serde")]
+    pub negative_cache_ttl: Duration,
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,6 +131,8 @@ pub enum AuthMode {
     None,
     /// Verify `EdDSA` JWTs locally and apply repository scopes.
     Jwt,
+    /// Verify opaque tokens with the issuer and apply the same repository scopes.
+    Introspect,
     /// Trust identity and permission headers injected by the front proxy.
     Forwarded,
 }
@@ -422,6 +439,18 @@ impl Default for JwtConfig {
     }
 }
 
+impl Default for IntrospectConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            secret_env: String::new(),
+            cache_ttl: Duration::from_secs(30),
+            negative_cache_ttl: Duration::from_secs(3),
+            timeout: Duration::from_secs(2),
+        }
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
@@ -540,6 +569,24 @@ impl Default for TelemetryConfig {
             lock_wait_warn: Duration::from_secs(1),
         }
     }
+}
+
+fn secure_auth_url(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    url.host().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
+        && (url.scheme() == "https"
+            || (url.scheme() == "http"
+                && match url.host() {
+                    Some(url::Host::Domain("localhost")) => true,
+                    Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+                    Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+                    _ => false,
+                }))
 }
 
 impl Config {
@@ -666,9 +713,7 @@ impl Config {
             );
             if let Some(url) = &jwt.jwks_url {
                 anyhow::ensure!(
-                    url.starts_with("https://")
-                        || url.starts_with("http://127.0.0.1:")
-                        || url.starts_with("http://localhost:"),
+                    secure_auth_url(url),
                     "auth.jwt.jwks_url must use https (http is allowed only on loopback)"
                 );
             }
@@ -678,6 +723,25 @@ impl Config {
                     "auth.jwt.audience may not be empty"
                 );
             }
+        }
+        if self.server.auth_mode == AuthMode::Introspect {
+            let introspect = &self.auth.introspect;
+            anyhow::ensure!(
+                secure_auth_url(&introspect.url),
+                "auth.introspect.url must use https (http is allowed only on loopback)"
+            );
+            anyhow::ensure!(
+                std::env::var(&introspect.secret_env).is_ok_and(|secret| !secret.is_empty()),
+                "auth.introspect.secret_env must name a set, non-empty environment variable"
+            );
+            anyhow::ensure!(
+                introspect.cache_ttl <= Duration::from_mins(10),
+                "auth.introspect.cache_ttl must be at most 10m"
+            );
+            anyhow::ensure!(
+                !introspect.timeout.is_zero() && introspect.timeout <= Duration::from_secs(10),
+                "auth.introspect.timeout must be greater than zero and at most 10s"
+            );
         }
         if let Some(u) = &self.server.public_url {
             anyhow::ensure!(
@@ -701,7 +765,7 @@ impl Config {
         if self.server.auth_mode == AuthMode::None {
             anyhow::ensure!(
                 self.server.listen.ip().is_loopback(),
-                "server.auth_mode = none is loopback-only (listen is {}); use jwt or forwarded for a public bind",
+                "server.auth_mode = none is loopback-only (listen is {}); use jwt, introspect or forwarded for a public bind",
                 self.server.listen
             );
         }
@@ -971,5 +1035,115 @@ leeway = "30s"
         .unwrap();
         assert_eq!(config.auth.jwt.audience.as_deref(), Some("gitcask"));
         assert_eq!(config.auth.jwt.leeway, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn introspect_config_defaults_and_limits() {
+        // Cargo supplies this harmless value to tests; avoid mutating the
+        // process environment while other tests run.
+        let mut config = Config::parse(
+            r#"
+[server]
+auth_mode = "introspect"
+[auth.introspect]
+url = "https://issuer.example/introspect"
+secret_env = "CARGO_PKG_NAME"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.server.auth_mode, AuthMode::Introspect);
+        assert_eq!(config.auth.introspect.cache_ttl, Duration::from_secs(30));
+        assert_eq!(
+            config.auth.introspect.negative_cache_ttl,
+            Duration::from_secs(3)
+        );
+        assert_eq!(config.auth.introspect.timeout, Duration::from_secs(2));
+        config.auth.introspect.cache_ttl = Duration::from_mins(10);
+        config.auth.introspect.timeout = Duration::from_secs(10);
+        config.validate().unwrap();
+        config.auth.introspect.cache_ttl += Duration::from_nanos(1);
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("cache_ttl")
+        );
+        config.auth.introspect.cache_ttl = Duration::ZERO;
+        config.auth.introspect.timeout += Duration::from_nanos(1);
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("timeout")
+        );
+        config.auth.introspect.timeout = Duration::ZERO;
+        assert!(config.validate().is_err());
+        config.auth.introspect.timeout = Duration::from_secs(2);
+        for name in ["", "GITCASK_TEST_INTROSPECT_UNSET_38", "INVALID=NAME"] {
+            config.auth.introspect.secret_env = name.into();
+            assert!(
+                config
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("secret_env")
+            );
+        }
+    }
+
+    #[test]
+    fn authentication_urls_require_https_or_loopback() {
+        for url in [
+            "https://issuer.example/introspect",
+            "http://localhost:1234/i",
+            "http://127.0.0.1/i",
+            "http://127.0.0.2:1234/i",
+            "http://[::1]:1234/i",
+        ] {
+            assert!(secure_auth_url(url), "{url}");
+        }
+        for url in [
+            "",
+            "https://",
+            "http://issuer.example/i",
+            "ftp://localhost/i",
+            "http://localhost:1234@evil.example/i",
+            "https://user:secret@issuer.example/i",
+            "http://127.0.0.1.example/i",
+            "http://[::2]/i",
+            "https://issuer.example/#fragment",
+        ] {
+            assert!(!secure_auth_url(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn introspect_empty_secret_is_rejected() {
+        const VARIABLE: &str = "GITCASK_TEST_INTROSPECT_EMPTY_38";
+        if std::env::var_os(VARIABLE).is_some() {
+            let mut config = Config::default();
+            config.server.auth_mode = AuthMode::Introspect;
+            config.auth.introspect.url = "https://issuer.example/i".into();
+            config.auth.introspect.secret_env = VARIABLE.into();
+            assert!(
+                config
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("secret_env")
+            );
+        } else {
+            // A child owns its environment; no unsafe set_var in a threaded test.
+            assert!(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "tests::introspect_empty_secret_is_rejected"])
+                    .env(VARIABLE, "")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
     }
 }

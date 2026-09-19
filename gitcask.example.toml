@@ -5,8 +5,8 @@
 # Validate with: gitcask config check gitcask.toml
 
 [server]
-listen = "127.0.0.1:8080"        # default; `auth_mode = none` is refused unless this is loopback. Public bind: 0.0.0.0 with jwt/forwarded.
-auth_mode = "none"                # "none" | "jwt" | "forwarded"; none grants write+admin and is loopback-only
+listen = "127.0.0.1:8080"        # default; `auth_mode = none` is refused unless this is loopback. Public bind: 0.0.0.0 with jwt/introspect/forwarded.
+auth_mode = "none"                # "none" | "jwt" | "introspect" | "forwarded"; none grants write+admin and is loopback-only
 max_concurrent_requests = 512     # global cap on in-flight git requests
 max_concurrent_per_repo = 64      # per-repo cap (upload-pack / receive-pack)
 request_timeout = "1h"
@@ -53,6 +53,32 @@ leeway = "60s"                    # exp/iat/nbf clock skew
 #
 # There is no revocation list by design (that would be state). Pay for it with narrow scopes
 # instead: one repository, the least permission that works.
+
+[auth.introspect]                 # used when server.auth_mode = "introspect"; opaque tokens
+url = ""                         # required: HTTPS endpoint, or HTTP on loopback for local development
+secret_env = ""                  # required: name of a set, non-empty env var; never put the secret here
+cache_ttl = "30s"                 # positive answer cap, <= 10m; 0s disables positive caching
+negative_cache_ttl = "3s"         # inactive/invalid token answers; 0s disables negative caching
+timeout = "2s"                   # entire upstream request, including body; > 0s and <= 10s
+# Git Basic passwords and API Bearer tokens are sent verbatim as JSON {"token":"…"}.
+# The request uses Authorization: Bearer <secret from secret_env>, read once at startup.
+# A 200 JSON answer is {"active":true,"principal":"user:42","scopes":["acme/*:read"],"ttl":30}.
+# principal is opaque and non-empty; scopes use the JWT grammar above (an empty array grants nothing).
+# active:false ignores other field values and yields 401, as do invalid principal/scopes/ttl answers.
+# An omitted ttl uses cache_ttl; a present ttl must be an unsigned integer (null is invalid).
+# Duplicate known fields, malformed JSON, non-200 (including issuer 401/403), >64 KiB bodies and network failures yield
+# 503 + Retry-After: 5 and are never cached. Rotate the service secret by restarting gitcask.
+#
+# Token lifetime and revocation belong to the platform. Cached grants live min(ttl, cache_ttl),
+# or cache_ttl when ttl is absent; that is also the maximum revocation delay on an instance.
+# Use 0s when every request must see platform revocation immediately. Cache hits keep working
+# through an issuer outage only until expiry; expired grants never authorize on service failure.
+# Each instance holds at most 10,000 FIFO answers keyed by SHA-256, never raw tokens. Concurrent
+# misses for one token share a request; 10,000 distinct in-flight lookups is the admission cap (503).
+# Shared answers carry the cache's absolute expiry: a follower resuming after it gets 503, never
+# an expired grant. Zero-TTL answers only coalesce the current flight and never enter the cache.
+# These caches are disposable warmth, not a credential store. The wire contract is gitcask's
+# JSON profile of the RFC 7662 model, not its form-encoded request or space-separated scope field.
 
 [store]
 backend = "s3"                    # default; "s3" (AWS, MinIO, rustfs, R2, Ceph, …) | "memory" (tests)

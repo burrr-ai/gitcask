@@ -27,7 +27,7 @@ is a WAL in S3; a server is a cache that may be wiped at any time.
 | Repo size | tens of GB; one pack larger than the disk | a few MB – a few hundred MB; packs always fit on disk |
 | Repo count | dozens, placed by hand in a config file | created automatically on sign-up; unbounded |
 | Concurrent push | hundreds of developers into one repository | one user per repository, plus that user's agent |
-| Auth | company IdP login, global write/admin flags | comwit issues scoped JWTs; gitcask verifies with a public key |
+| Auth | company IdP login, global write/admin flags | platform-owned tokens; gitcask verifies JWTs or introspects opaque tokens |
 | Metadata | none (replaced by S3 enumeration) | **comwit's RDB** (repository list, owner, last_push_at) |
 
 Because of this inversion, everything walgit built for *one big repository* is removed, and everything that
@@ -40,8 +40,9 @@ bucket each pass. Nothing there moved toward the many-small-repositories workloa
 
 ## 3. Settled decisions
 
-1. **Identity and the permission model live outside gitcask.** comwit judges sessions/permissions and issues
-   EdDSA JWTs; gitcask verifies only the signature and the repository scopes with a public key/JWKS. There is
+1. **Identity and the permission model live outside gitcask.** The platform judges sessions/permissions and
+   owns tokens; gitcask verifies EdDSA JWTs with a public key/JWKS or introspects opaque tokens (AGENTS D47),
+   then applies the same repository scopes. There is
    no login, no user DB, no sessions, no token issuance, no OIDC, no TLS.
 2. **The repository list and metadata live in comwit's RDB.** The enumerate-every-repository APIs
    (`registry.list()` + S3 HEAD) are gone; the maintainer takes its work from push-driven markers, never from
@@ -66,7 +67,7 @@ bucket each pass. Nothing there moved toward the many-small-repositories workloa
 - The S3 backend (`gitcask-store`)
 - The maintainer loop (`maintain.rs`) — reworked to be marker-driven
 - rev-index / fsck, drain
-- EdDSA JWT verification + repository scopes, plus `forwarded` mode for existing proxies
+- EdDSA JWT verification or opaque-token introspection + repository scopes, plus `forwarded` mode for existing proxies
 - Repository create/delete (`admin.rs`: `PUT/DELETE /{o}/{r}`)
 - Operational status API + SSE (`/{o}/{r}/api/overview|ops|tasks`, `sse.rs`)
 - The repository browsing API (`web/api/`)
@@ -78,7 +79,7 @@ bucket each pass. Nothing there moved toward the many-small-repositories workloa
 ### Removed
 | Group | What | Why |
 |---|---|---|
-| Auth | OIDC/browser login (`web/login.rs`), token **issuance endpoints**, install scripts (`setup.rs`, `/services/public/*`, `setup.json`), built-in TLS (`tls.rs`) | identity and issuance belong to the platform; gitcask only verifies a public key |
+| Auth | OIDC/browser login (`web/login.rs`), token **issuance endpoints**, install scripts (`setup.rs`, `/services/public/*`, `setup.json`), built-in TLS (`tls.rs`) | identity and issuance belong to the platform; gitcask only verifies credentials |
 | Bundles | the `gitcask-bundle` crate, `bundles.rs`, CLI `bundle`, `[bundles]`, bundle-uri advertisement | small repositories clone instantly |
 | Big-repo machinery | in-process upload-pack (`upload_gix.rs`), the remote reader (`remote.rs`), `store_mount`, prewarm, tier-2 base/history packs, `cache.mode = budget` | packs always fit locally |
 | Placement & forwarding | `[placement]`, the push broker (`forward.rs`, `push_broker_*`), upstream follow/mirror (`follow.rs`, `mirror.rs`, `[upstream]`) | proxy routing replaces placement; nothing follows external repositories |
@@ -126,13 +127,13 @@ The removals were carried out as the scoped tasks listed in §5.
 | 35 operations runbook (`docs/OPERATIONS.md`) — verified metrics table, symptom-first diagnosis, recovery | ✅ merged |
 | 36 rename repohub → gitcask across crates, config, metrics, headers and docs; relicense MIT → Apache-2.0 with NOTICE | ✅ merged (2026-09-01, public release) |
 | 37 port upstream fixes: verify tips on empty-pack pushes (walgit d5e75caf); un-blind `just warnings` under forced colour (walgit b81b15ae) | ✅ merged (PR #2) |
-| 38 `auth_mode = "introspect"` — opaque tokens verified by RFC 7662 token introspection, bounded in-memory cache, 503 on introspection outage | 🔄 in progress |
-| local smoke (`scripts/smoke.sh`, rustfs) | ✅ 51/51 — re-run on every merge |
+| 38 `auth_mode = "introspect"` — opaque tokens verified by RFC 7662 token introspection, bounded in-memory cache, 503 on introspection outage | ✅ merged (PR #4) |
+| local smoke (`scripts/smoke.sh`, rustfs) | ✅ 63/63 — includes introspect phase 4; re-run on every merge |
 | `AGENTS.md` / `GOAL.md` / `README.md` rewrites | ✅ |
 
 Remaining (outside gitcask, or later):
 - comwit integration: call `PUT/DELETE /{owner}/{repo}` on project create/delete, issue user git tokens in the
-  same EdDSA claim format, consume the `[events]` webhook (D6)
+  chosen JWT/introspection format, consume the `[events]` webhook (D6, AGENTS D47)
 - (D10) putting the browsing API to use
 
 ## 6. Vocabulary
@@ -159,7 +160,7 @@ deployment.
 | D3 | push rate limiting | at the proxy. gitcask does none |
 | D4 | repository deletion | hard delete (`DELETE /{o}/{r}` deletes from S3 immediately). Any recovery policy is comwit's |
 | D5 | LFS | on. `lfs.max_object_bytes = 1GiB` |
-| D6 | user git auth | comwit issues EdDSA scoped JWTs; HTTPS Basic (username ignored + token). gitcask verifies directly with the public key/JWKS |
+| D6 | user git auth | Originally EdDSA scoped JWTs over HTTPS Basic (username ignored + token), verified with public key/JWKS. AGENTS D47 extends this to platform-owned opaque tokens via introspection |
 | D7 | existing data | new projects go to gitcask; existing ones convert on access |
 | D8 | storage | AWS S3 |
 | D9 | cache eviction | `cache.evict_idle_after = "2h"` |
@@ -169,5 +170,5 @@ deployment.
 | D13 | product boundary and the gate | (2026-09-01, **superseded by D14**) authentication lived in a separate gate process in the OSS core. Retired by task 34 to remove the trusted headers, the duplicated path-to-permission table and the second process |
 | D14 | product boundary and JWT | (2026-09-01) the OSS core = auth · git transport · read/write API. gitcask verifies EdDSA JWT signatures and repository scopes itself but **owns no identity**; issuance belongs to the platform or the offline CLI. The cloud = multi-tenancy · billing · operations. CI, issues, PRs, UI and repository listing are out of scope |
 
-Both the comwit backend and users' git CLIs send JWTs to the same single gitcask process. Only deployments
+Both platform backends and users' git CLIs send tokens to the same single gitcask process. Only deployments
 that already have their own IdP proxy choose `server.auth_mode = "forwarded"`.

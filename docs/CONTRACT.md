@@ -24,6 +24,8 @@ Read `AGENTS.md` first (design §1–§2, decisions §3; the original layout/pha
   `ObjectStoreExt`, `Prefixed`, `memory::MemoryStore`, `util::{collect,once,file_stream,backoff,retry}`),
   modules `coord.rs`, `s3.rs`, and test-only `fault.rs` / `memory.rs`.
 - `gitcask-config`: `Config` for gitcask.toml (+ `GITCASK__` env overrides, `PORT`).
+  `AuthMode::{None,Jwt,Introspect,Forwarded}`; `AuthConfig::{jwt,introspect}`. `IntrospectConfig` holds
+  `url`, `secret_env`, `cache_ttl`, `negative_cache_ttl`, `timeout`; the secret value is never config data.
 
 ## gitcask-git (owner: GitEngine)
 
