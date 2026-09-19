@@ -127,7 +127,7 @@ The removals were carried out as the scoped tasks listed in §5.
 | 35 operations runbook (`docs/OPERATIONS.md`) — verified metrics table, symptom-first diagnosis, recovery | ✅ merged |
 | 36 rename repohub → gitcask across crates, config, metrics, headers and docs; relicense MIT → Apache-2.0 with NOTICE | ✅ merged (2026-09-01, public release) |
 | 37 port upstream fixes: verify tips on empty-pack pushes (walgit d5e75caf); un-blind `just warnings` under forced colour (walgit b81b15ae) | ✅ merged (PR #2) |
-| 38 `auth_mode = "introspect"` — opaque tokens verified by RFC 7662 token introspection, bounded in-memory cache, 503 on introspection outage | merged-pending — implemented and verified; PR awaiting merge |
+| 38 `auth_mode = "introspect"` — opaque tokens verified by RFC 7662 token introspection, bounded in-memory cache, 503 on introspection outage | ✅ merged (PR #4) |
 | local smoke (`scripts/smoke.sh`, rustfs) | ✅ 63/63 — includes introspect phase 4; re-run on every merge |
 | `AGENTS.md` / `GOAL.md` / `README.md` rewrites | ✅ |
 

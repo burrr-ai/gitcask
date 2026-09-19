@@ -168,7 +168,7 @@ operations all live on the closed side, which is a natural moat regardless of th
 | Item | Status |
 |---|---|
 | Upstream correctness fixes since the fork (empty-pack tip verification; warnings gate blind under forced colour) | done (T37, PR #2). Upstream is reviewed monthly for such fixes; they are re-implemented, not cherry-picked |
-| Opaque-token authentication (`auth_mode = "introspect"`, RFC 7662) for platforms without a JWT signer | merged-pending (T38) |
+| Opaque-token authentication (`auth_mode = "introspect"`, RFC 7662) for platforms without a JWT signer | ✅ merged (PR #4) |
 | Ref-level push restrictions (protected branches, fast-forward only) | open — needed before agents get write tokens; the platform cannot enforce this after the fact because the push has already landed |
 | git transport, read API, repository CRUD, event webhooks, metrics, size limits | done |
 | Write API — branch/tag CRUD, archive | done (T28): reuses the WAL publish path, `expected_old_oid` CAS, immutable archives |

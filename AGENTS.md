@@ -309,7 +309,10 @@ decision in §4 — or the PR is; never "fix later".
   A strictly bounded 10,000-entry FIFO cache uses SHA-256 token digests, never credentials; positive answers
   live `min(ttl, cache_ttl)` (default 30 s, maximum 10 min), inactive/invalid token answers use
   `negative_cache_ttl` (default 3 s). Concurrent misses share one call, including failure; the in-flight table
-  is also capped at 10,000 and cancellation releases waiters. FIFO gives constant-time eviction without
+  is also capped at 10,000 and cancellation releases waiters. Shared answers carry the cache's absolute
+  expiry; a late follower gets 503 rather than an expired grant. Zero-TTL answers coalesce only the current
+  flight. Duplicate known response fields are uncached service errors; a present non-integer `ttl`, including
+  null, is an invalid token answer. FIFO gives constant-time eviction without
   another cache dependency. These answers are warmth: restarting loses only latency, never authoritative
   identity or revocation state. Platform revocation is observed after the cached grant expires; zero TTL
   disables positive caching. Non-200, malformed JSON, oversized (>64 KiB) responses and transport errors
