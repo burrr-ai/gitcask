@@ -88,6 +88,19 @@ async fn receive_pack_maps_retryable_publish_errors_to_503() -> anyhow::Result<(
         .await?;
     drop(handle.sync_full().await?);
 
+    // A real local tip lets this ref-only push reach publication even with the
+    // mandatory object-existence check. Tags may point directly at blobs.
+    let blob = handle
+        .local()
+        .git(&["hash-object", "-w", "/dev/null"])
+        .await?;
+    assert!(
+        blob.status.success(),
+        "{}",
+        String::from_utf8_lossy(&blob.stderr)
+    );
+    let new_oid = String::from_utf8(blob.stdout)?;
+
     // The request sync above is still fresh. The first matching operation is
     // therefore the publisher's manifest CAS, whose Retryable error must
     // survive batching and reach the smart-HTTP response as a 503.
@@ -99,8 +112,7 @@ async fn receive_pack_maps_retryable_publish_errors_to_503() -> anyhow::Result<(
         .with_only(&["manifest.pb"]),
     );
     let zero = "0".repeat(40);
-    let new_oid = "1".repeat(40);
-    let command = format!("{zero} {new_oid} refs/heads/main\0report-status");
+    let command = format!("{zero} {} refs/tags/blob\0report-status", new_oid.trim());
     let mut body = Vec::new();
     gitcask_git::pkt::encode_data(&mut body, command.as_bytes());
     gitcask_git::pkt::encode_flush(&mut body);
