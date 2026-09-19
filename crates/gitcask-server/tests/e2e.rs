@@ -756,6 +756,275 @@ fn jwt_repo_url(server: &str, token: &str) -> anyhow::Result<String> {
     Ok(url.to_string())
 }
 
+struct FakeIntrospector {
+    url: String,
+    tokens:
+        std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, serde_json::Value>>>,
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+impl FakeIntrospector {
+    async fn start() -> anyhow::Result<Self> {
+        let tokens = std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::<
+            String,
+            serde_json::Value,
+        >::new()));
+        let table = tokens.clone();
+        // Cargo's harmless test variable avoids process-global env mutation.
+        let secret = format!("Bearer {}", std::env::var("CARGO_PKG_NAME")?);
+        let app = axum::Router::new().route(
+            "/introspect",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap,
+                      axum::Json(body): axum::Json<serde_json::Value>| {
+                    let table = table.clone();
+                    let secret = secret.clone();
+                    async move {
+                        if headers.get("authorization").and_then(|v| v.to_str().ok())
+                            != Some(secret.as_str())
+                        {
+                            return (
+                                axum::http::StatusCode::UNAUTHORIZED,
+                                axum::Json(serde_json::json!({})),
+                            );
+                        }
+                        let token = body
+                            .get("token")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default();
+                        let answer = table
+                            .lock()
+                            .get(token)
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({"active": false}));
+                        (axum::http::StatusCode::OK, axum::Json(answer))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let url = format!("http://{}/introspect", listener.local_addr()?);
+        let (shutdown, receive) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = receive.await;
+                })
+                .await
+        });
+        Ok(Self {
+            url,
+            tokens,
+            shutdown,
+            task,
+        })
+    }
+
+    fn grant(&self, token: &str, scopes: &[&str]) {
+        self.tokens.lock().insert(token.into(), serde_json::json!({"active": true, "principal": format!("user:{token}"), "scopes": scopes}));
+    }
+
+    async fn stop(self) -> TestResult {
+        let _ = self.shutdown.send(());
+        self.task.await??;
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn introspect_push_clone_permissions_revocation_and_outage() -> TestResult {
+    let fake = FakeIntrospector::start().await?;
+    fake.grant("write", &["introspect/r:write"]);
+    fake.grant("read", &["introspect/*:read"]);
+    fake.grant("admin", &["introspect/*:admin"]);
+    fake.grant("empty", &[]);
+    fake.grant("cached", &["introspect/r:read"]);
+    let url = fake.url.clone();
+    let server = Server::start_with_tweak(move |config| {
+        config.server.auth_mode = gitcask_config::AuthMode::Introspect;
+        config.auth.introspect.url = url;
+        config.auth.introspect.secret_env = "CARGO_PKG_NAME".into();
+        config.auth.introspect.cache_ttl = Duration::from_secs(1);
+    })
+    .await?;
+    let client = reqwest::Client::new();
+    let repo = format!("{}/introspect/r.git", server.base_url);
+    let refs = format!("{repo}/info/refs?service=git-upload-pack");
+    let no_token = client
+        .get(&refs)
+        .header("X-Gitcask-Principal", "spoofed")
+        .send()
+        .await?;
+    assert_eq!(no_token.status(), 401);
+    assert_eq!(
+        no_token.headers().get("www-authenticate").unwrap(),
+        "Basic realm=\"gitcask\""
+    );
+    assert_eq!(
+        client
+            .put(&repo)
+            .bearer_auth("write")
+            .send()
+            .await?
+            .status(),
+        201
+    );
+    let src = TestRepo::synthetic(2, 2)?;
+    let write_url = repo.replacen("http://", "http://ignored:write@", 1);
+    git_in(&src, &["push", "-q", &write_url, "main"])?;
+    for token in ["write", "read"] {
+        let url = repo.replacen("http://", &format!("http://ignored:{token}@"), 1);
+        let clone = tempfile::tempdir()?;
+        git(&["clone", "-q", &url, "."], clone.path())?;
+        assert_eq!(
+            git_in(&src, &["rev-parse", "main"])?,
+            git_in(clone.path(), &["rev-parse", "main"])?
+        );
+        if token == "read" {
+            assert!(git_in(clone.path(), &["push", "origin", "HEAD:refs/heads/denied"]).is_err());
+        }
+    }
+    introspect_permission_checks(&client, &server.base_url).await?;
+    let delete_repo = format!("{}/introspect/delete.git", server.base_url);
+    assert_eq!(
+        client
+            .put(&delete_repo)
+            .bearer_auth("admin")
+            .send()
+            .await?
+            .status(),
+        201
+    );
+    assert_eq!(
+        client
+            .delete(&delete_repo)
+            .bearer_auth("admin")
+            .send()
+            .await?
+            .status(),
+        204
+    );
+
+    // Refresh immediately before revocation; the issuer changes instantly,
+    // while gitcask observes it when this instance's positive TTL expires.
+    assert_eq!(
+        client.get(&refs).bearer_auth("read").send().await?.status(),
+        200
+    );
+    fake.tokens.lock().remove("read");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let revoked = client.get(&refs).bearer_auth("read").send().await?;
+    assert_eq!(revoked.status(), 401);
+    assert_eq!(
+        revoked.headers().get("www-authenticate").unwrap(),
+        "Basic realm=\"gitcask\""
+    );
+
+    assert_eq!(
+        client
+            .get(&refs)
+            .bearer_auth("cached")
+            .send()
+            .await?
+            .status(),
+        200
+    );
+    fake.stop().await?;
+    assert_eq!(
+        client
+            .get(&refs)
+            .bearer_auth("cached")
+            .send()
+            .await?
+            .status(),
+        200
+    );
+    let outage = client.get(&refs).bearer_auth("cache-miss").send().await?;
+    assert_eq!(outage.status(), 503);
+    assert_eq!(outage.headers().get("retry-after").unwrap(), "5");
+    assert!(!outage.headers().contains_key("www-authenticate"));
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    assert_eq!(
+        client
+            .get(&refs)
+            .bearer_auth("cached")
+            .send()
+            .await?
+            .status(),
+        503
+    );
+    Ok(())
+}
+
+async fn introspect_permission_checks(client: &reqwest::Client, base: &str) -> TestResult {
+    let repo = format!("{base}/introspect/r.git");
+    let receive = format!("{repo}/info/refs?service=git-receive-pack");
+    assert_eq!(
+        client
+            .get(receive)
+            .bearer_auth("read")
+            .send()
+            .await?
+            .status(),
+        404
+    );
+    for token in ["read", "write"] {
+        assert_eq!(
+            client
+                .delete(&repo)
+                .bearer_auth(token)
+                .header("X-Gitcask-Principal", "spoofed")
+                .header("X-Gitcask-Write", "1")
+                .header("X-Gitcask-Admin", "1")
+                .send()
+                .await?
+                .status(),
+            404
+        );
+    }
+    for (path, token, status) in [
+        ("/introspect/r/api/refs", "read", 200),
+        ("/introspect/r/api/refs", "empty", 404),
+        ("/another/r/api/refs", "read", 404),
+        ("/api/v1/openapi.json", "empty", 200),
+        ("/introspect/r/api/refs", "unknown", 401),
+    ] {
+        assert_eq!(
+            client
+                .get(format!("{base}{path}"))
+                .bearer_auth(token)
+                .send()
+                .await?
+                .status(),
+            status
+        );
+    }
+    assert_eq!(
+        client
+            .put(format!("{base}/introspect/r/api/refs/heads/denied"))
+            .bearer_auth("read")
+            .json(&serde_json::json!({"target":"main"}))
+            .send()
+            .await?
+            .status(),
+        404
+    );
+    for (operation, status) in [("download", 200), ("upload", 404)] {
+        assert_eq!(
+            client
+                .post(format!("{repo}/info/lfs/objects/batch"))
+                .bearer_auth("read")
+                .json(&serde_json::json!({"operation":operation,"objects":[]}))
+                .send()
+                .await?
+                .status(),
+            status
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn jwt_push_clone_scope_expiry_spoofing_signature_and_lfs() -> TestResult {
     let (private_key, public_key) = gitcask_server::auth::generate_key_pair_pem()?;

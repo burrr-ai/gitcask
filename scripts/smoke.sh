@@ -6,6 +6,7 @@ ROOT=${1:?repo root}; PORT=${2:-8090}
 export RUSTUP_TOOLCHAIN=1.97.1 AWS_ACCESS_KEY_ID=gitcask-dev AWS_SECRET_ACCESS_KEY=gitcask-dev-secret
 S3_PORT=${GITCASK_RUSTFS_PORT:-19000}
 S="$(dirname "$0")"; W=$(mktemp -d); CACHE=$W/cache; LOG=$W/server.log
+export GIT_CONFIG_GLOBAL="$W/gitconfig" GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0
 PASS=0; FAIL=0
 ok()  { echo "  ok   $1"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL $1"; FAIL=$((FAIL+1)); }
@@ -190,6 +191,54 @@ curl -sf "${READ[@]}" $BASE/smoke/jwt.git/info/lfs/objects/$LFS_OID -o $W/lfs-ou
 echo "$upload_batch" | grep -q '"upload"' && echo "$download_batch" | grep -q '"download"' && cmp -s $W/lfs-input $W/lfs-output && ok "jwt LFS batch + basic upload/download" || bad "jwt LFS batch + basic upload/download"
 code=$(curl -s -o /dev/null -w '%{http_code}' "${ADMIN[@]}" -X DELETE $BASE/smoke/jwt.git); [ "$code" = 204 -o "$code" = 200 ] && ok "jwt admin deletes repo -> $code" || bad "jwt delete -> $code"
 stop
+echo "== phase 4: introspect =="
+export GITCASK_SMOKE_INTROSPECT_SECRET=smoke-service-secret
+python3 "$S/introspect-fixture.py" "$W/introspect-url" "$W/revoked" >"$W/introspect.log" 2>&1 &
+IPID=$!
+introspect_cleanup() {
+    kill "${SPID:-}" "$IPID" 2>/dev/null || true
+    wait "$IPID" 2>/dev/null || true
+}
+trap introspect_cleanup EXIT
+trap 'exit 1' INT TERM
+for _ in $(seq 1 60); do [ -s "$W/introspect-url" ] && break; sleep 0.1; done
+[ -s "$W/introspect-url" ] || { echo "introspection fixture did not start"; exit 1; }
+sed -i.bak 's|auth_mode = "jwt"|auth_mode = "introspect"|' "$W/cfg.toml"
+cat >> "$W/cfg.toml" <<EOF
+
+[auth.introspect]
+url = "$(cat "$W/introspect-url")"
+secret_env = "GITCASK_SMOKE_INTROSPECT_SECRET"
+cache_ttl = "1s"
+negative_cache_ttl = "1s"
+timeout = "2s"
+EOF
+start
+check curl -sf "$BASE/readyz"
+INT_REPO=$BASE/smoke/introspect.git
+challenge=$(curl -s -D - -o /dev/null "$INT_REPO/info/refs?service=git-upload-pack" | tr -d '\r')
+echo "$challenge" | grep -q '401 Unauthorized' && echo "$challenge" | grep -qi 'www-authenticate: Basic realm="gitcask"' && ok "introspect no token -> 401 with Basic challenge" || bad "introspect 401 challenge"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer write' -X PUT "$INT_REPO"); [ "$code" = 201 ] && ok "introspect write creates repo" || bad "introspect create -> $code"
+INT_WRITE=http://ignored:write@127.0.0.1:$PORT/smoke/introspect.git
+INT_READ=http://ignored:read@127.0.0.1:$PORT/smoke/introspect.git
+(cd "$W/src" && git push -q "$INT_WRITE" HEAD:main) && ok "introspect Basic write push" || bad "introspect Basic write push"
+git clone -q "$INT_WRITE" "$W/introspect-write" && ok "introspect Basic write clone" || bad "introspect Basic write clone"
+git clone -q "$INT_READ" "$W/introspect-read" && ok "introspect Basic read clone" || bad "introspect Basic read clone"
+(cd "$W/introspect-read" && git push -q origin HEAD:denied 2>/dev/null) && bad "introspect read push should fail" || ok "introspect read push refused"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer read' "$INT_REPO/info/refs?service=git-receive-pack"); [ "$code" = 404 ] && ok "introspect read receive-pack -> 404" || bad "introspect read receive-pack -> $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer read' -H 'X-Gitcask-Principal: spoofed' -H 'X-Gitcask-Write: 1' -H 'X-Gitcask-Admin: 1' -X DELETE "$INT_REPO"); [ "$code" = 404 ] && ok "introspect ignores spoofed grants" || bad "introspect spoofed grants -> $code"
+touch "$W/revoked"
+sleep 2
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer read' "$INT_REPO/info/refs?service=git-upload-pack"); [ "$code" = 401 ] && ok "introspect revoked read token -> 401" || bad "introspect revocation -> $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer admin' -X DELETE "$INT_REPO"); [ "$code" = 204 ] && ok "introspect admin deletes repo" || bad "introspect delete -> $code"
+stop
+export GITCASK_SMOKE_INTROSPECT_SECRET=wrong-service-secret
+start
+unavailable=$(curl -s -D - -o /dev/null -H 'Authorization: Bearer write' -X PUT "$INT_REPO" | tr -d '\r')
+echo "$unavailable" | grep -q '503 Service Unavailable' && echo "$unavailable" | grep -qi '^retry-after: 5$' && ok "introspect wrong service secret -> 503 + Retry-After: 5" || bad "introspect wrong secret response"
+stop
+introspect_cleanup
+trap - EXIT INT TERM
 echo "== result: pass=$PASS fail=$FAIL  (log: $LOG, work: $W) =="
 grep -iE 'error|panic' $LOG | grep -v 'refused\|401\|403\|404' | head -10
 [ $FAIL -eq 0 ]

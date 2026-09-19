@@ -1486,6 +1486,7 @@ dependencies = [
  "serde",
  "toml",
  "tracing",
+ "url",
 ]
 
 [[package]]
