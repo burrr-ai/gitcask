@@ -1,7 +1,7 @@
 # gitcask container image — one authenticated server in front of an object store.
 #
-#   podman build -t gitcask -f Containerfile .
-#   podman run --rm -p 8080:8080 \
+#   docker build -t gitcask .
+#   docker run --rm -p 8080:8080 \
 #       -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
 #       -v ./gitcask.toml:/etc/gitcask/gitcask.toml:ro \
 #       -v gitcask-cache:/var/lib/gitcask \
@@ -10,11 +10,11 @@
 # The image carries git (upload-pack, repack, index-pack run as subprocesses),
 # git-lfs, CA certificates and tini. Config comes from /etc/gitcask/gitcask.toml or
 # GITCASK__SECTION__KEY environment overrides; the local cache (materialized repositories,
-# a self-signed TLS cert) lives under /var/lib/gitcask and can be wiped at any time — the
+# scratch files) lives under /var/lib/gitcask and can be wiped at any time — the
 # bucket is the only durable state.
 
 # ---- 1. rust build ------------------------------------------------------------------------
-FROM docker.io/library/rust:1.97-bookworm AS build
+FROM docker.io/library/rust:1.97.1-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev pkg-config cmake perl python3 \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
@@ -22,6 +22,8 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 ARG GITCASK_BUILD_SHA=dev
 ENV GITCASK_BUILD_SHA=${GITCASK_BUILD_SHA}
+ARG CARGO_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked -p gitcask-cli \
@@ -37,6 +39,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends git git-lfs ca-
     && git --version
 RUN useradd --uid 1000 --create-home --shell /bin/sh gitcask \
     && mkdir -p /etc/gitcask /var/lib/gitcask && chown gitcask:gitcask /var/lib/gitcask
+ARG GITCASK_VERSION=dev
+ARG GITCASK_BUILD_SHA=dev
+LABEL org.opencontainers.image.source="https://github.com/burrr-ai/gitcask" \
+    org.opencontainers.image.licenses="Apache-2.0" \
+    org.opencontainers.image.version="${GITCASK_VERSION}" \
+    org.opencontainers.image.revision="${GITCASK_BUILD_SHA}"
+COPY LICENSE NOTICE /usr/share/doc/gitcask/
 COPY --from=build /out/bin/gitcask /out/bin/gitcask-server /usr/local/bin/
 COPY gitcask.example.toml /etc/gitcask/gitcask.toml
 COPY gitcask.standalone.toml /etc/gitcask/gitcask.standalone.toml

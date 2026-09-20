@@ -55,12 +55,29 @@ Data can always be taken out: `git clone --mirror` exports a repository (with `g
 
 ## Running it
 
+Published images are available at `ghcr.io/burrr-ai/gitcask:0.0.1` for `linux/amd64` and
+`linux/arm64`. Pin the patch tag or the image digest recorded in the
+[release](https://github.com/burrr-ai/gitcask/releases); there is no floating `latest` tag.
+
+```sh
+docker pull ghcr.io/burrr-ai/gitcask:0.0.1
+docker run --rm -p 8080:8080 \
+  -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+  -v "$PWD/gitcask.toml:/etc/gitcask/gitcask.toml:ro" \
+  ghcr.io/burrr-ai/gitcask:0.0.1
+```
+
+Provide a production config with your S3 bucket/region/endpoint and JWT or introspection authentication.
+The cache at `/var/lib/gitcask` is disposable. The image runs as UID 1000; mounted cache directories must
+be writable by that user. S3 credentials are currently read from environment variables at startup;
+IAM role discovery and automatic temporary-credential refresh are not implemented.
+
 Platforms with opaque tokens use `server.auth_mode = "introspect"` and configure their introspection endpoint in [`gitcask.example.toml`](gitcask.example.toml).
 
 ```sh
 # build (needs the Rust version in rust-toolchain.toml, plus protoc)
 cargo build --release -p gitcask-cli
-# or: docker build -t gitcask -f Containerfile .
+# or: docker build -t gitcask .
 
 # one machine: gitcask with authentication on :8080, backed by local rustfs
 docker compose up --build -d

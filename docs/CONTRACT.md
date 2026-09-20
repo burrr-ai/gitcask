@@ -250,5 +250,5 @@ pub async fn serve(state: Arc<AppState>, shutdown: impl Future<Output=()> + Send
 ## gitcask-cli (owner: Cli)
 `gitcask --config gitcask.toml <cmd>`: `serve` | `compact owner/name [--once]` |
 `repo create|info` | `wal pending|ls|show|materialize --at-seq` | `synth --out DIR --size s|m|l [--commits N --files M]`
-| `import --from GITDIR owner/name` | `token keygen|mint`. Also `Containerfile`, `compose.yaml` (rustfs +
+| `import --from GITDIR owner/name` | `token keygen|mint`. Also `Dockerfile`, `compose.yaml` (rustfs +
 gitcask), `justfile`, `gitcask.example.toml`, `tests/e2e.sh` (real git vs. server on memory store and on rustfs).

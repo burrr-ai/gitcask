@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "gitcask-cli"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1478,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "gitcask-config"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytesize",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "gitcask-git"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1527,7 +1527,7 @@ dependencies = [
 
 [[package]]
 name = "gitcask-proto"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bytes",
  "prost",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "gitcask-server"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "gitcask-store"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1624,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "gitcask-wal"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytes",
