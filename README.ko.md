@@ -55,10 +55,27 @@ cd demo && git commit --allow-empty -m first && git push -u origin HEAD:main
 
 ## 실행
 
+`linux/amd64`와 `linux/arm64` 이미지를 `ghcr.io/burrr-ai/gitcask:0.0.1`로 제공합니다.
+패치 버전 태그 또는 [릴리스](https://github.com/burrr-ai/gitcask/releases)에 기록된 이미지 digest를
+지정해 배포합니다. 자동으로 바뀌는 `latest` 태그는 제공하지 않습니다.
+
+```sh
+docker pull ghcr.io/burrr-ai/gitcask:0.0.1
+docker run --rm -p 8080:8080 \
+  -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+  -v "$PWD/gitcask.toml:/etc/gitcask/gitcask.toml:ro" \
+  ghcr.io/burrr-ai/gitcask:0.0.1
+```
+
+운영 설정 파일에는 S3 버킷·리전·엔드포인트와 JWT 또는 introspect 인증을 설정해야 합니다.
+`/var/lib/gitcask`는 지워져도 복구되는 캐시입니다. 이미지는 UID 1000으로 실행하므로 마운트하는
+캐시 디렉터리는 해당 사용자가 쓸 수 있어야 합니다. 현재 S3 자격증명은 시작 시 환경변수에서
+읽습니다. IAM Role 자동 인증과 임시 자격증명 자동 갱신은 아직 지원하지 않습니다.
+
 ```sh
 # 빌드 (rust-toolchain.toml에 지정된 Rust 버전과 protoc 필요)
 cargo build --release -p gitcask-cli
-# 또는: docker build -t gitcask -f Containerfile .
+# 또는: docker build -t gitcask .
 
 # 한 대 구성: 인증을 켠 gitcask를 8080 포트에서, 로컬 rustfs를 스토리지로
 docker compose up --build -d

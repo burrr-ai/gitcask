@@ -72,7 +72,7 @@ services:
     image: gitcask:local
     build:
       context: .
-      dockerfile: Containerfile
+      dockerfile: Dockerfile
     depends_on:
       create-bucket:
         condition: service_completed_successfully

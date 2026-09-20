@@ -46,6 +46,9 @@ bucket round trips and update `docs/ROUNDTRIPS.md`.
 
 ## Changes and commits
 
+Container releases use `0.0.x` patch versions. See [Releasing](docs/RELEASING.md) for the tag,
+CI, image smoke, and GHCR publication procedure.
+
 - Keep each commit focused on one idea and use an imperative subject.
 - Update tests, configuration examples, and the single authoritative document for any behavior you change.
 - Do not add compatibility aliases or deprecated shapes before 1.0; remove the old shape in the same change.

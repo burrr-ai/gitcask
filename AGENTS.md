@@ -39,7 +39,7 @@ decisions numbered in §4 here); this file keeps the rules.
 | `gitcask.example.toml` | Every config key with its default and a comment. Change it with the code. |
 | `gitcask.standalone.toml` | The one-machine shape: one JWT-verifying `gitcask-server` on :8080 → rustfs. |
 | `deploy/nginx.conf.example` | Optional public TLS and `X-Accel-Redirect` byte offload in front of gitcask. |
-| `Containerfile` | An OCI image. |
+| `Dockerfile` | An OCI image. |
 
 ---
 
