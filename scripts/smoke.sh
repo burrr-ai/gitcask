@@ -237,6 +237,31 @@ start
 unavailable=$(curl -s -D - -o /dev/null -H 'Authorization: Bearer write' -X PUT "$INT_REPO" | tr -d '\r')
 echo "$unavailable" | grep -q '503 Service Unavailable' && echo "$unavailable" | grep -qi '^retry-after: 5$' && ok "introspect wrong service secret -> 503 + Retry-After: 5" || bad "introspect wrong secret response"
 stop
+echo "== phase 5: introspect + forwarded on one listener =="
+export GITCASK_SMOKE_INTROSPECT_SECRET=smoke-service-secret GITCASK_FORWARD_SECRET=proxy-secret
+rm -f "$W/revoked"
+sed -i.bak 's|auth_mode = "introspect"|auth_mode = "introspect_forwarded"|' "$W/cfg.toml"
+start
+MIXED=$BASE/smoke/mixed.git
+PROXY=(-H 'X-Gitcask-Forward-Secret: proxy-secret' -H 'X-Gitcask-Principal: proxy:user')
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer write' -X PUT "$MIXED"); [ "$code" = 201 ] && ok "combined direct Bearer create" || bad "combined create -> $code"
+(cd "$W/src" && git push -q "http://ignored:write@127.0.0.1:$PORT/smoke/mixed.git" HEAD:main) && ok "combined direct Basic push" || bad "combined direct Basic push"
+git -c http.extraHeader='X-Gitcask-Forward-Secret: proxy-secret' -c http.extraHeader='X-Gitcask-Principal: proxy:user' clone -q "$MIXED" "$W/mixed-clone" && ok "combined proxy clone on same listener" || bad "combined proxy clone"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Gitcask-Principal: spoofed' -H 'X-Gitcask-Write: 1' "$MIXED/info/refs?service=git-upload-pack"); [ "$code" = 401 ] && ok "combined spoofed identity alone -> 401" || bad "combined spoofed identity -> $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer read' -H 'X-Gitcask-Principal: spoofed' -H 'X-Gitcask-Admin: 1' -X DELETE "$MIXED"); [ "$code" = 404 ] && ok "combined spoofed grants cannot broaden scope" || bad "combined spoofed grants -> $code"
+for secret_header in 'X-Gitcask-Forward-Secret: wrong' 'X-Gitcask-Forward-Secret;'; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' -H "$secret_header" -H 'X-Gitcask-Principal: proxy:user' -H 'Authorization: Bearer admin' "$MIXED/info/refs?service=git-upload-pack"); [ "$code" = 401 ] && ok "combined invalid/empty proxy secret never falls back" || bad "combined invalid/empty secret -> $code"
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Gitcask-Forward-Secret: proxy-secret' -H 'Authorization: Bearer admin' "$MIXED/info/refs?service=git-upload-pack"); [ "$code" = 401 ] && ok "combined proxy missing principal -> 401" || bad "combined missing principal -> $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' "${PROXY[@]}" -H 'Authorization: Bearer admin' -X DELETE "$MIXED"); [ "$code" = 403 ] && ok "combined proxy wins; token admin is not merged" || bad "combined privilege merge -> $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' "${PROXY[@]}" -H 'Authorization: Bearer invalid' "$MIXED/info/refs?service=git-upload-pack"); [ "$code" = 200 ] && ok "combined trusted proxy ignores invalid token" || bad "combined invalid token precedence -> $code"
+kill "$IPID"; wait "$IPID" 2>/dev/null || true
+sleep 2
+unavailable=$(curl -s -D - -o /dev/null -H 'Authorization: Bearer read' "$MIXED/info/refs?service=git-upload-pack" | tr -d '\r')
+echo "$unavailable" | grep -q '503 Service Unavailable' && echo "$unavailable" | grep -qi '^retry-after: 5$' && ok "combined issuer outage -> 503 + Retry-After" || bad "combined issuer outage response"
+code=$(curl -s -o /dev/null -w '%{http_code}' "${PROXY[@]}" -H 'Authorization: Bearer read' "$MIXED/info/refs?service=git-upload-pack"); [ "$code" = 200 ] && ok "combined proxy survives issuer outage" || bad "combined proxy outage -> $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' "${PROXY[@]}" -H 'X-Gitcask-Admin: 1' -X DELETE "$MIXED"); [ "$code" = 204 ] && ok "combined proxy admin deletes repo" || bad "combined proxy delete -> $code"
+stop
 introspect_cleanup
 trap - EXIT INT TERM
 echo "== result: pass=$PASS fail=$FAIL  (log: $LOG, work: $W) =="

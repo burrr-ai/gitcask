@@ -957,6 +957,297 @@ async fn introspect_push_clone_permissions_revocation_and_outage() -> TestResult
     Ok(())
 }
 
+// This child process alone receives the shared secret; no unsafe process-global
+// environment mutation can affect standalone-mode tests running in parallel.
+#[test]
+fn introspect_forwarded_same_listener() -> TestResult {
+    const CHILD: &str = "GITCASK_TEST_COMBINED_E2E_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let status = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "introspect_forwarded_same_listener",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("GITCASK_FORWARD_SECRET", "proxy-secret")
+            .status()?;
+        anyhow::ensure!(status.success(), "combined auth child failed");
+        return Ok(());
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?
+        .block_on(combined_auth_scenario())
+}
+
+fn proxy(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    request
+        .header("X-Gitcask-Forward-Secret", "proxy-secret")
+        .header("X-Gitcask-Principal", "proxy:user")
+}
+
+async fn expect_auth_status(request: reqwest::RequestBuilder, expected: u16) -> TestResult {
+    let response = request.send().await?;
+    assert_eq!(response.status(), expected);
+    if expected == 401 {
+        assert_eq!(
+            response
+                .headers()
+                .get("www-authenticate")
+                .context("challenge")?,
+            "Basic realm=\"gitcask\""
+        );
+    } else {
+        assert!(!response.headers().contains_key("www-authenticate"));
+    }
+    if expected == 503 {
+        assert_eq!(
+            response
+                .headers()
+                .get("retry-after")
+                .context("retry-after")?,
+            "5"
+        );
+    }
+    Ok(())
+}
+
+async fn combined_auth_scenario() -> TestResult {
+    let fake = FakeIntrospector::start().await?;
+    fake.grant("write", &["introspect/r:write"]);
+    fake.grant("read", &["introspect/*:read"]);
+    fake.grant("admin", &["introspect/*:admin"]);
+    fake.grant("empty", &[]);
+    let url = fake.url.clone();
+    let server = Server::start_with_tweak(move |config| {
+        config.server.auth_mode = gitcask_config::AuthMode::IntrospectForwarded;
+        config.auth.introspect.url = url;
+        config.auth.introspect.secret_env = "CARGO_PKG_NAME".into();
+        config.auth.introspect.cache_ttl = Duration::ZERO;
+    })
+    .await?;
+    let client = reqwest::Client::new();
+    let repo = format!("{}/introspect/r.git", server.base_url);
+    expect_auth_status(client.put(&repo).bearer_auth("write"), 201).await?;
+    let src = TestRepo::synthetic(2, 2)?;
+    let direct = repo.replacen("http://", "http://ignored:write@", 1);
+    git_in(&src, &["push", "-q", &direct, "main"])?;
+    for args in [
+        vec![
+            "-c",
+            "http.extraHeader=X-Gitcask-Forward-Secret: proxy-secret",
+            "-c",
+            "http.extraHeader=X-Gitcask-Principal: proxy:user",
+            "clone",
+            "-q",
+            &repo,
+            ".",
+        ],
+        vec!["clone", "-q", &direct, "."],
+    ] {
+        let clone = tempfile::tempdir()?;
+        git(&args, clone.path())?;
+        assert_eq!(
+            git_in(&src, &["rev-parse", "main"])?,
+            git_in(clone.path(), &["rev-parse", "main"])?
+        );
+    }
+    git_in(
+        &src,
+        &[
+            "-c",
+            "http.extraHeader=X-Gitcask-Forward-Secret: proxy-secret",
+            "-c",
+            "http.extraHeader=X-Gitcask-Principal: proxy:user",
+            "-c",
+            "http.extraHeader=X-Gitcask-Write: 1",
+            "push",
+            "-q",
+            &repo,
+            "main:proxy",
+        ],
+    )?;
+    introspect_permission_checks(&client, &server.base_url).await?;
+    combined_precedence_checks(&client, &server).await?;
+    combined_permission_checks(&client, &server.base_url).await?;
+    fake.stop().await?;
+    let refs = format!("{repo}/info/refs?service=git-upload-pack");
+    expect_auth_status(client.get(&refs).bearer_auth("read"), 503).await?;
+    expect_auth_status(proxy(client.get(&refs).bearer_auth("read")), 200).await?;
+    expect_auth_status(
+        proxy(client.put(format!("{}/introspect/outage", server.base_url)))
+            .header("X-Gitcask-Write", "1"),
+        201,
+    )
+    .await?;
+    expect_auth_status(
+        proxy(client.delete(&repo)).header("X-Gitcask-Admin", "1"),
+        204,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn combined_precedence_checks(client: &reqwest::Client, server: &Server) -> TestResult {
+    let refs = format!("{}/introspect/r/api/refs", server.base_url);
+    let spoofed = || {
+        client
+            .get(&refs)
+            .header("X-Gitcask-Principal", "spoofed")
+            .header("X-Gitcask-Write", "1")
+            .header("X-Gitcask-Admin", "1")
+    };
+    expect_auth_status(spoofed(), 401).await?;
+    expect_auth_status(spoofed().bearer_auth("read"), 200).await?;
+    for secret in ["", " ", "wrong", "proxy-secret,wrong"] {
+        expect_auth_status(
+            spoofed()
+                .bearer_auth("admin")
+                .header("X-Gitcask-Forward-Secret", secret),
+            401,
+        )
+        .await?;
+    }
+    expect_auth_status(
+        spoofed().bearer_auth("admin").header(
+            "X-Gitcask-Forward-Secret",
+            reqwest::header::HeaderValue::from_bytes(b"\xff")?,
+        ),
+        401,
+    )
+    .await?;
+    for secrets in [
+        ["proxy-secret", "wrong"],
+        ["wrong", "proxy-secret"],
+        ["proxy-secret", "proxy-secret"],
+    ] {
+        expect_auth_status(
+            spoofed()
+                .bearer_auth("admin")
+                .header("X-Gitcask-Forward-Secret", secrets[0])
+                .header("X-Gitcask-Forward-Secret", secrets[1]),
+            401,
+        )
+        .await?;
+    }
+    expect_auth_status(
+        client
+            .get(&refs)
+            .bearer_auth("admin")
+            .header("X-Gitcask-Forward-Secret", "proxy-secret"),
+        401,
+    )
+    .await?;
+    expect_auth_status(
+        client
+            .get(&refs)
+            .bearer_auth("admin")
+            .header("X-Gitcask-Forward-Secret", "proxy-secret")
+            .header("X-Gitcask-Principal", " "),
+        401,
+    )
+    .await?;
+    for token in ["read", "admin", "unknown"] {
+        expect_auth_status(proxy(client.get(&refs).bearer_auth(token)), 200).await?;
+    }
+    // Inspect the resolved identity as well as route status: proxy wins and
+    // spoofed headers without its secret never replace the token principal.
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("authorization", "Bearer read".parse()?);
+    headers.insert("x-gitcask-principal", "proxy:user".parse()?);
+    assert_eq!(
+        server
+            .state
+            .auth
+            .authenticate(&headers)
+            .await
+            .map_err(|e| anyhow::anyhow!("auth: {e:?}"))?
+            .name,
+        "user:read"
+    );
+    headers.insert("x-gitcask-forward-secret", "proxy-secret".parse()?);
+    assert_eq!(
+        server
+            .state
+            .auth
+            .authenticate(&headers)
+            .await
+            .map_err(|e| anyhow::anyhow!("auth: {e:?}"))?
+            .name,
+        "proxy:user"
+    );
+    for path in ["/healthz", "/readyz"] {
+        expect_auth_status(
+            client
+                .get(format!("{}{path}", server.base_url))
+                .header("X-Gitcask-Forward-Secret", "wrong"),
+            200,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn combined_permission_checks(client: &reqwest::Client, base: &str) -> TestResult {
+    let repo = format!("{base}/introspect/r.git");
+    let receive = format!("{repo}/info/refs?service=git-receive-pack");
+    // A more privileged token cannot supplement a proxy's missing grants.
+    expect_auth_status(proxy(client.get(&receive).bearer_auth("admin")), 403).await?;
+    expect_auth_status(proxy(client.delete(&repo).bearer_auth("admin")), 403).await?;
+    expect_auth_status(
+        proxy(client.get(&receive)).header("X-Gitcask-Admin", "1"),
+        403,
+    )
+    .await?;
+    expect_auth_status(
+        proxy(client.get(&receive).bearer_auth("empty")).header("X-Gitcask-Write", "1"),
+        200,
+    )
+    .await?;
+    expect_auth_status(
+        proxy(client.delete(&repo)).header("X-Gitcask-Write", "1"),
+        403,
+    )
+    .await?;
+    expect_auth_status(
+        client.get(&receive).basic_auth("ignored", Some("read")),
+        404,
+    )
+    .await?;
+    expect_auth_status(
+        client.get(&receive).basic_auth("ignored", Some("write")),
+        200,
+    )
+    .await?;
+    let delete_repo = format!("{base}/introspect/delete");
+    expect_auth_status(client.put(&delete_repo).bearer_auth("admin"), 201).await?;
+    expect_auth_status(client.delete(&delete_repo).bearer_auth("admin"), 204).await?;
+    expect_auth_status(
+        proxy(client.put(&delete_repo)).header("X-Gitcask-Write", "1"),
+        201,
+    )
+    .await?;
+    expect_auth_status(
+        proxy(client.delete(&delete_repo).bearer_auth("read")).header("X-Gitcask-Admin", "1"),
+        204,
+    )
+    .await?;
+    expect_auth_status(
+        proxy(client.get(format!("{base}/api/v1/openapi.json"))),
+        200,
+    )
+    .await?;
+    expect_auth_status(
+        proxy(client.post(format!("{repo}/info/lfs/objects/batch")))
+            .json(&serde_json::json!({"operation":"upload","objects":[]})),
+        403,
+    )
+    .await?;
+    Ok(())
+}
+
 async fn introspect_permission_checks(client: &reqwest::Client, base: &str) -> TestResult {
     let repo = format!("{base}/introspect/r.git");
     let receive = format!("{repo}/info/refs?service=git-receive-pack");

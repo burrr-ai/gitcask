@@ -74,7 +74,7 @@ the core side; `PUT /repos/{o}/{r}/pulls/{n}/merge` (approvals, checks, policy) 
 | Read API (refs/resolve/tree/blob/commits/commit/compare) | ● | |
 | Write API (branches/tags, archive, batch commits, merge) | ● | |
 | Repository create/delete | ● | |
-| JWT verification, token introspection, repository scopes, offline token CLI (§6) | ● | |
+| JWT verification, token introspection, trusted forwarding, repository scopes, offline token CLI (§6) | ● | |
 | Event webhooks, metrics, `/healthz`, size limits | ● | |
 | Migration tooling | ● | |
 | Multi-tenancy (tenant isolation, bucket placement) | | ● |
@@ -119,7 +119,7 @@ The line along which things *can* separate is **"does it read packs (git objects
 
 | Level | How | Why |
 |---|---|---|
-| **Process split** | none | JWT verification or issuer introspection and the handlers' own permission checks live in one process, so there is no duplicated path-to-permission table and no trusted header to forge. |
+| **Process split** | none | Credential verification and the handlers' permission checks live in one process, with one path-to-permission table. Optional trusted forwarding follows the explicit security boundary in §6. |
 | **Logical split** | roles (`serve` / `maintain` / `events`) | Want pure storage? Point only `serve` hosts at the bucket. The code boundary is `crates/gitcask-server/src/web/`. |
 | **Physical split** | static bytes go to the edge | Raw blobs and archives are immutable and servable without packs — `X-Accel-Redirect` (D23). The real split point for a SaaS whose cost is bandwidth. |
 
@@ -148,7 +148,10 @@ Introspection keeps identity outside gitcask too: the platform owns its opaque t
 instantly, with gitcask observing revocation when its bounded answer cache expires (or on every request with
 zero positive TTL).
 gitcask has no user DB, no sessions, no revocation list, no usage history.
-Deployments that already have a trusted IdP proxy can choose `forwarded` mode instead.
+Deployments with a trusted IdP proxy can choose `forwarded`, or explicitly enable `introspect_forwarded`
+to accept direct opaque tokens and proxy requests on one listener. This remains credential verification
+in the OSS core, with one identity per request and no platform policy engine. See the
+[precedence and proxy trust contract](../SECURITY.md#mixed-direct-and-trusted-proxy-authentication).
 
 ## 7. License
 
