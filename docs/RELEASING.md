@@ -5,7 +5,7 @@ The release image is `ghcr.io/burrr-ai/gitcask:<version>`, built from the root `
 Deploy an exact patch tag or digest; no floating `latest`, `0`, or `0.0` image tags are published.
 
 Every protected `main` push also builds amd64 and arm64 images in the immutable ECR repository
-`188382150131.dkr.ecr.ap-northeast-2.amazonaws.com/comwit-gitcask`, scans both platforms, and uploads
+`188382150131.dkr.ecr.ap-northeast-2.amazonaws.com/gitcask`, scans both platforms, and uploads
 `gitcask-build-evidence.json` plus the Trivy report to the successful **Release** workflow run.
 Set the non-secret repository variables `GITCASK_RELEASE_ROLE_ARN` (GitHub OIDC role) and
 `GITCASK_ECR_REPOSITORY_URI` (that ECR URI) before publishing.

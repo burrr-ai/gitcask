@@ -220,13 +220,13 @@ jobs:
             echo "set repository variable GITCASK_ECR_REPOSITORY_URI" >&2
             exit 1
           fi
-          expected_uri="${EXPECTED_AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/comwit-gitcask"
+          expected_uri="${EXPECTED_AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/gitcask"
           if [[ "$ECR_REPOSITORY_URI" != "$expected_uri" ]]; then
             echo "GITCASK_ECR_REPOSITORY_URI must be $expected_uri" >&2
             exit 1
           fi
           {
-            echo "repository_name=comwit-gitcask"
+            echo "repository_name=gitcask"
             echo "image_tag=sha-$GITHUB_SHA-run-$GITHUB_RUN_ID-attempt-$GITHUB_RUN_ATTEMPT"
           } >>"$GITHUB_OUTPUT"
 
