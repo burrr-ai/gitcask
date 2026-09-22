@@ -69,8 +69,24 @@ docker run --rm -p 8080:8080 \
 
 Provide a production config with your S3 bucket/region/endpoint and JWT or introspection authentication.
 The cache at `/var/lib/gitcask` is disposable. The image runs as UID 1000; mounted cache directories must
-be writable by that user. S3 credentials are currently read from environment variables at startup;
-IAM role discovery and automatic temporary-credential refresh are not implemented.
+be writable by that user. By default, S3 keys are read from environment variables at startup. Set
+`store.s3.credentials = "default"` to use the AWS SDK credential chain (environment, profile,
+ECS task role, then instance metadata) with automatic refresh. On ECS, the SDK picks up the task
+role automatically; attach one and use:
+
+```toml
+[store]
+bucket = "your-bucket"
+
+[store.s3]
+credentials = "default"
+region = "us-east-1"
+endpoint = ""                 # use AWS S3 rather than the local rustfs default
+force_path_style = false
+```
+
+`access_key_env` and `secret_key_env` are ignored in this mode. Presigned URLs, including those
+used for `accel_redirect`, work only when the SDK can obtain signing credentials.
 
 Platforms with opaque tokens use `server.auth_mode = "introspect"` and configure their introspection endpoint in [`gitcask.example.toml`](gitcask.example.toml).
 To accept direct tokens and trusted proxy requests on the same listener, opt into `introspect_forwarded`;

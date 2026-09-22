@@ -113,6 +113,7 @@ gix-actor = "0.41"
 gix-hashtable = "0.16"
 gix-validate = "0.11"
 aws-sdk-s3 = "1"
+aws-config = "1"
 aws-smithy-types = "1"
 clap = { version = "4", features = ["derive", "env"] }
 rand = "0.9"

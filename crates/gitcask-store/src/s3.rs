@@ -88,30 +88,41 @@ pub struct S3Store {
 impl S3Store {
     /// Build a store from `gitcask-config::StoreConfig`.
     ///
-    /// Credentials are read from the env vars named in
-    /// `cfg.s3.access_key_env` / `cfg.s3.secret_key_env`
-    /// (defaults `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`), plus
-    /// `AWS_SESSION_TOKEN` when present.
+    /// Static credentials come from the configured env vars (and optional
+    /// `AWS_SESSION_TOKEN`). Default credentials use the AWS SDK provider chain.
     pub async fn new(cfg: &gitcask_config::StoreConfig) -> anyhow::Result<Self> {
-        let access_key = std::env::var(&cfg.s3.access_key_env).map_err(|_| {
-            anyhow::anyhow!("s3: env var {} not set (access key)", cfg.s3.access_key_env)
-        })?;
-        let secret_key = std::env::var(&cfg.s3.secret_key_env).map_err(|_| {
-            anyhow::anyhow!("s3: env var {} not set (secret key)", cfg.s3.secret_key_env)
-        })?;
-
-        let creds = static_credentials(
-            &access_key,
-            &secret_key,
-            std::env::var("AWS_SESSION_TOKEN").ok(),
-        );
         let region = aws_sdk_s3::config::Region::new(cfg.s3.region.clone());
-
         let mut s3_config = aws_sdk_s3::Config::builder()
-            .region(region)
-            .credentials_provider(creds)
+            .region(region.clone())
             .force_path_style(cfg.s3.force_path_style)
             .behavior_version_latest();
+
+        s3_config = match cfg.s3.credentials {
+            gitcask_config::S3CredentialsMode::Static => {
+                let access_key = std::env::var(&cfg.s3.access_key_env).map_err(|_| {
+                    anyhow::anyhow!("s3: env var {} not set (access key)", cfg.s3.access_key_env)
+                })?;
+                let secret_key = std::env::var(&cfg.s3.secret_key_env).map_err(|_| {
+                    anyhow::anyhow!("s3: env var {} not set (secret key)", cfg.s3.secret_key_env)
+                })?;
+                let creds = static_credentials(
+                    &access_key,
+                    &secret_key,
+                    std::env::var("AWS_SESSION_TOKEN").ok(),
+                );
+                s3_config.credentials_provider(creds)
+            }
+            gitcask_config::S3CredentialsMode::Default => {
+                let shared_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .region(region)
+                    .load()
+                    .await;
+                let provider = shared_config.credentials_provider().ok_or_else(|| {
+                    anyhow::anyhow!("s3: AWS default credentials provider unavailable")
+                })?;
+                s3_config.credentials_provider(provider)
+            }
+        };
 
         if !cfg.s3.endpoint.is_empty() {
             s3_config = s3_config.endpoint_url(&cfg.s3.endpoint);
@@ -1134,6 +1145,18 @@ fn static_credentials(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn default_credentials_build_without_static_key_env_vars() {
+        let mut cfg = gitcask_config::StoreConfig::default();
+        cfg.s3.credentials = gitcask_config::S3CredentialsMode::Default;
+        cfg.s3.access_key_env = "GITCASK_TEST_MISSING_S3_ACCESS_KEY".into();
+        cfg.s3.secret_key_env = "GITCASK_TEST_MISSING_S3_SECRET_KEY".into();
+        assert!(std::env::var(&cfg.s3.access_key_env).is_err());
+        assert!(std::env::var(&cfg.s3.secret_key_env).is_err());
+
+        S3Store::new(&cfg).await.expect("construct S3 client");
+    }
 
     fn sdk_failure_for_test(
         code: Option<&str>,

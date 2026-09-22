@@ -181,9 +181,18 @@ pub enum StoreBackend {
 pub struct S3Config {
     pub endpoint: String,
     pub region: String,
+    pub credentials: S3CredentialsMode,
     pub access_key_env: String,
     pub secret_key_env: String,
     pub force_path_style: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum S3CredentialsMode {
+    #[default]
+    Static,
+    Default,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -501,6 +510,7 @@ impl Default for S3Config {
         S3Config {
             endpoint: "http://127.0.0.1:9000".into(),
             region: "us-east-1".into(),
+            credentials: S3CredentialsMode::Static,
             access_key_env: "AWS_ACCESS_KEY_ID".into(),
             secret_key_env: "AWS_SECRET_ACCESS_KEY".into(),
             force_path_style: true,
@@ -896,6 +906,7 @@ mod tests {
         assert_eq!(c.server.listen.port(), 8080);
         assert!(!c.server.auto_create_on_push);
         assert_eq!(c.store.backend, StoreBackend::S3);
+        assert_eq!(c.store.s3.credentials, S3CredentialsMode::Static);
         assert_eq!(c.cache.bulk_threads, 2);
         assert_eq!(c.cache.shared_retention, Duration::from_hours(30 * 24));
         c.validate().unwrap();
@@ -903,6 +914,16 @@ mod tests {
         let text = toml::to_string(&c).unwrap();
         let back = Config::parse(&text).unwrap();
         assert_eq!(back.store.bucket, c.store.bucket);
+    }
+
+    #[test]
+    fn s3_credentials_mode_parses() {
+        let default = Config::parse("[store.s3]\ncredentials = \"default\"\n").unwrap();
+        assert_eq!(default.store.s3.credentials, S3CredentialsMode::Default);
+
+        let static_mode = Config::parse("[store.s3]\ncredentials = \"static\"\n").unwrap();
+        assert_eq!(static_mode.store.s3.credentials, S3CredentialsMode::Static);
+        assert!(Config::parse("[store.s3]\ncredentials = \"unknown\"\n").is_err());
     }
 
     #[test]
