@@ -40,6 +40,7 @@ max_retries = 4                    # transient failures; each jittered delay is 
 [store.s3]
 endpoint = "http://127.0.0.1:19000"
 region = "us-east-1"
+credentials = "static"
 access_key_env = "AWS_ACCESS_KEY_ID"       # compose.yaml fixes gitcask-dev / gitcask-dev-secret for rustfs
 secret_key_env = "AWS_SECRET_ACCESS_KEY"
 force_path_style = true

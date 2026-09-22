@@ -332,6 +332,13 @@ decision in §4 — or the PR is; never "fix later".
   requests, routes, ports or identity state are added. The precise error semantics and mandatory proxy
   header stripping live in [SECURITY.md](SECURITY.md#mixed-direct-and-trusted-proxy-authentication).
 
+- **D49** **S3 credentials may come from the AWS SDK default chain** (2026-09-23).
+  `store.s3.credentials = "static"` remains the default and reads the configured key environment variables
+  once at startup, including an optional session token. `"default"` uses the SDK's refreshing credential
+  chain (environment, profile, ECS task role, IMDS); the configured key environment variable names are ignored.
+  Region, endpoint and path-style settings apply in either mode. Presigned URLs and edge byte offload require
+  the SDK to obtain signing credentials.
+
 Decision identifiers are stable; gaps in the numbering are intentional.
 
 ---

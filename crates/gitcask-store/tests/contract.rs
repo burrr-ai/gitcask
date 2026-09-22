@@ -701,6 +701,7 @@ async fn s3_contract() {
         s3: gitcask_config::S3Config {
             endpoint: endpoint.clone(),
             region: "us-east-1".into(),
+            credentials: gitcask_config::S3CredentialsMode::Static,
             access_key_env: "AWS_ACCESS_KEY_ID".into(),
             secret_key_env: "AWS_SECRET_ACCESS_KEY".into(),
             force_path_style: true,
