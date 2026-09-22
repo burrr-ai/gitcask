@@ -2,6 +2,7 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v0.0.*"]
 
 permissions:
@@ -11,8 +12,18 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  AWS_REGION: ap-northeast-2
+  EXPECTED_AWS_ACCOUNT_ID: "188382150131"
+  AWS_RELEASE_ROLE_ARN: ${{ vars.GITCASK_RELEASE_ROLE_ARN }}
+  ECR_REPOSITORY_URI: ${{ vars.GITCASK_ECR_REPOSITORY_URI }}
+  BUILD_EVIDENCE_FILE: gitcask-build-evidence.json
+  VULNERABILITY_FILE: gitcask.trivy.json
+  TRIVY_VERSION: v0.70.0
+
 jobs:
   validate:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -40,10 +51,12 @@ jobs:
           PY
 
   ci:
+    if: startsWith(github.ref, 'refs/tags/')
     needs: validate
     uses: ./.github/workflows/ci.yml
 
   image:
+    if: startsWith(github.ref, 'refs/tags/')
     needs: [validate, ci]
     strategy:
       fail-fast: false
@@ -102,6 +115,7 @@ jobs:
           retention-days: 1
 
   publish:
+    if: startsWith(github.ref, 'refs/tags/')
     needs: [validate, image]
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -168,3 +182,283 @@ jobs:
           PY
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --verify-tag --title "gitcask $VERSION" --notes-file "$RUNNER_TEMP/release.md"
+
+  ecr-contract:
+    if: github.ref == 'refs/heads/main' && github.ref_protected == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      repository_name: ${{ steps.contract.outputs.repository_name }}
+      image_tag: ${{ steps.contract.outputs.image_tag }}
+    steps:
+      - name: Validate protected-main and infrastructure inputs
+        id: contract
+        shell: bash
+        env:
+          REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = "push"
+          test "$GITHUB_REF" = "refs/heads/main"
+          if [[ "$REF_PROTECTED" != "true" ]]; then
+            echo "main is not protected; refusing release publication" >&2
+            exit 1
+          fi
+          if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "github.sha must be a full lowercase 40-character commit SHA" >&2
+            exit 1
+          fi
+          if [[ -z "$AWS_RELEASE_ROLE_ARN" ]]; then
+            echo "set repository variable GITCASK_RELEASE_ROLE_ARN" >&2
+            exit 1
+          fi
+          if [[ ! "$AWS_RELEASE_ROLE_ARN" =~ ^arn:aws:iam::${EXPECTED_AWS_ACCOUNT_ID}:role/[A-Za-z0-9+=,.@_/-]+$ ]]; then
+            echo "GITCASK_RELEASE_ROLE_ARN must name a role in AWS account $EXPECTED_AWS_ACCOUNT_ID" >&2
+            exit 1
+          fi
+          if [[ -z "$ECR_REPOSITORY_URI" ]]; then
+            echo "set repository variable GITCASK_ECR_REPOSITORY_URI" >&2
+            exit 1
+          fi
+          expected_uri="${EXPECTED_AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/comwit-gitcask"
+          if [[ "$ECR_REPOSITORY_URI" != "$expected_uri" ]]; then
+            echo "GITCASK_ECR_REPOSITORY_URI must be $expected_uri" >&2
+            exit 1
+          fi
+          {
+            echo "repository_name=comwit-gitcask"
+            echo "image_tag=sha-$GITHUB_SHA-run-$GITHUB_RUN_ID-attempt-$GITHUB_RUN_ATTEMPT"
+          } >>"$GITHUB_OUTPUT"
+
+  ecr-arch-image:
+    if: github.ref == 'refs/heads/main' && github.ref_protected == true
+    needs: ecr-contract
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Check out the exact protected SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify source and workspace version
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+      - name: Authenticate to AWS with GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gh-${{ github.run_id }}-${{ matrix.arch }}
+      - name: Verify AWS account and immutable ECR repository
+        shell: bash
+        env:
+          REPOSITORY_NAME: ${{ needs.ecr-contract.outputs.repository_name }}
+          IMAGE_TAG: ${{ needs.ecr-contract.outputs.image_tag }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = "$EXPECTED_AWS_ACCOUNT_ID"
+          read -r tag_mutability scan_on_push <<<"$(
+            aws ecr describe-repositories \
+              --repository-names "$REPOSITORY_NAME" \
+              --query 'repositories[0].[imageTagMutability,imageScanningConfiguration.scanOnPush]' \
+              --output text
+          )"
+          if [[ "$tag_mutability" != "IMMUTABLE" || "$scan_on_push" != "True" ]]; then
+            echo "gitcask ECR must use immutable tags and scan-on-push" >&2
+            exit 1
+          fi
+          existing="$(aws ecr batch-get-image --repository-name "$REPOSITORY_NAME" \
+            --image-ids "imageTag=$IMAGE_TAG-$ARCH" --query 'length(images)' --output text)"
+          if [[ "$existing" != "0" ]]; then
+            echo "refusing duplicate publication of an existing immutable architecture tag" >&2
+            exit 1
+          fi
+      - name: Log in to ECR
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecr get-login-password | docker login --username AWS --password-stdin "${ECR_REPOSITORY_URI%%/*}"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build and push the native architecture
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            GITCASK_VERSION=${{ steps.source.outputs.version }}
+            GITCASK_BUILD_SHA=${{ github.sha }}
+          tags: ${{ env.ECR_REPOSITORY_URI }}:${{ needs.ecr-contract.outputs.image_tag }}-${{ matrix.arch }}
+          push: true
+          provenance: false
+          cache-from: type=gha,scope=ecr-image-${{ matrix.arch }}
+          cache-to: type=gha,scope=ecr-image-${{ matrix.arch }},mode=max
+
+  ecr-image:
+    if: github.ref == 'refs/heads/main' && github.ref_protected == true
+    needs: [ecr-contract, ecr-arch-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Authenticate to AWS with GitHub OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ env.AWS_RELEASE_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gh-${{ github.run_id }}-publish
+      - name: Verify AWS account and immutable ECR repository
+        shell: bash
+        env:
+          REPOSITORY_NAME: ${{ needs.ecr-contract.outputs.repository_name }}
+          IMAGE_TAG: ${{ needs.ecr-contract.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          test "$(aws sts get-caller-identity --query Account --output text)" = "$EXPECTED_AWS_ACCOUNT_ID"
+          read -r tag_mutability scan_on_push <<<"$(
+            aws ecr describe-repositories \
+              --repository-names "$REPOSITORY_NAME" \
+              --query 'repositories[0].[imageTagMutability,imageScanningConfiguration.scanOnPush]' \
+              --output text
+          )"
+          if [[ "$tag_mutability" != "IMMUTABLE" || "$scan_on_push" != "True" ]]; then
+            echo "gitcask ECR must use immutable tags and scan-on-push" >&2
+            exit 1
+          fi
+          existing="$(aws ecr batch-get-image --repository-name "$REPOSITORY_NAME" \
+            --image-ids "imageTag=$IMAGE_TAG" --query 'length(images)' --output text)"
+          if [[ "$existing" != "0" ]]; then
+            echo "refusing duplicate publication of an existing immutable release attempt" >&2
+            exit 1
+          fi
+      - name: Log in to ECR
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecr get-login-password | docker login --username AWS --password-stdin "${ECR_REPOSITORY_URI%%/*}"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Push the qualified immutable tag and resolve its digest
+        id: publish
+        shell: bash
+        env:
+          REPOSITORY_NAME: ${{ needs.ecr-contract.outputs.repository_name }}
+          IMAGE_TAG: ${{ needs.ecr-contract.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          child_images=()
+          child_digests=()
+          for arch in amd64 arm64; do
+            digest="$(aws ecr describe-images --repository-name "$REPOSITORY_NAME" \
+              --image-ids "imageTag=$IMAGE_TAG-$arch" \
+              --query 'imageDetails[0].imageDigest' --output text)"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "ECR did not return a valid $arch image digest" >&2
+              exit 1
+            fi
+            child_images+=("$ECR_REPOSITORY_URI@$digest")
+            child_digests+=("$digest")
+          done
+          docker buildx imagetools create --tag "$ECR_REPOSITORY_URI:$IMAGE_TAG" "${child_images[@]}"
+          digest="$(aws ecr describe-images --repository-name "$REPOSITORY_NAME" \
+            --image-ids "imageTag=$IMAGE_TAG" \
+            --query 'imageDetails[0].imageDigest' --output text)"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "ECR did not return a valid manifest-list digest" >&2
+            exit 1
+          fi
+          digest_uri="$ECR_REPOSITORY_URI@$digest"
+          docker buildx imagetools inspect "$digest_uri" --format '{{json .Manifest}}' >"$RUNNER_TEMP/ecr-manifest.json"
+          jq -e --arg amd64 "${child_digests[0]}" --arg arm64 "${child_digests[1]}" '
+            [.manifests[] | {digest, os: .platform.os, arch: .platform.architecture}] |
+            length == 2 and
+            any(.[]; .digest == $amd64 and .os == "linux" and .arch == "amd64") and
+            any(.[]; .digest == $arm64 and .os == "linux" and .arch == "arm64")
+          ' "$RUNNER_TEMP/ecr-manifest.json" >/dev/null
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          echo "digest_uri=$digest_uri" >>"$GITHUB_OUTPUT"
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+      - name: Gate fixed high and critical vulnerabilities on both platforms
+        shell: bash
+        env:
+          IMAGE_DIGEST_URI: ${{ steps.publish.outputs.digest_uri }}
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            trivy image --platform "linux/$arch" --scanners vuln \
+              --format json --output "$RUNNER_TEMP/trivy-$arch.json" \
+              --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+              "$IMAGE_DIGEST_URI"
+          done
+          jq -n --arg digest_uri "$IMAGE_DIGEST_URI" \
+            --slurpfile amd64 "$RUNNER_TEMP/trivy-amd64.json" \
+            --slurpfile arm64 "$RUNNER_TEMP/trivy-arm64.json" \
+            '{image_digest_uri: $digest_uri,
+              scans: [{platform: "linux/amd64", report: $amd64[0]},
+                      {platform: "linux/arm64", report: $arm64[0]}]}' \
+            >"$VULNERABILITY_FILE"
+      - name: Write machine-readable build evidence
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ needs.ecr-contract.outputs.image_tag }}
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+          IMAGE_DIGEST_URI: ${{ steps.publish.outputs.digest_uri }}
+        run: |
+          set -euo pipefail
+          vulnerability_sha256="$(sha256sum "$VULNERABILITY_FILE" | awk '{print $1}')"
+          jq -n \
+            --arg source_repository "$GITHUB_REPOSITORY" \
+            --arg source_sha "$GITHUB_SHA" \
+            --arg workflow "$GITHUB_WORKFLOW" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg image_repository "$ECR_REPOSITORY_URI" \
+            --arg image_tag "$IMAGE_TAG" \
+            --arg image_digest "$IMAGE_DIGEST" \
+            --arg image_digest_uri "$IMAGE_DIGEST_URI" \
+            --arg vulnerability_sha256 "$vulnerability_sha256" \
+            '{schema: "comwit.release-image-build/v1",
+              source: {repository: $source_repository, sha: $source_sha},
+              builder: {control_plane: "github-actions", workflow: $workflow,
+                        run_id: $run_id, run_attempt: $run_attempt},
+              image: {repository: $image_repository, tag: $image_tag,
+                      digest: $image_digest, digest_uri: $image_digest_uri},
+              vulnerability_gate: {scanner: "trivy", result: "passed",
+                                   sha256: $vulnerability_sha256}}' \
+            >"$BUILD_EVIDENCE_FILE"
+          jq -e --arg sha "$GITHUB_SHA" --arg digest "$IMAGE_DIGEST" \
+            '.source.sha == $sha and .image.digest == $digest' \
+            "$BUILD_EVIDENCE_FILE" >/dev/null
+      - name: Upload release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gitcask-release-${{ github.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ env.BUILD_EVIDENCE_FILE }}
+            ${{ env.VULNERABILITY_FILE }}
+          if-no-files-found: error
+          retention-days: 90
