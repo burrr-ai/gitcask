@@ -61,8 +61,8 @@ decisions numbered in §4 here); this file keeps the rules.
   client: SSE envelope for API clients, sideband band-2 lines for git. "Cloning into… and then nothing" is a bug.
 
 ### 1.3 Security contract (`Config::validate` fails closed)
-- Four auth modes (`server.auth_mode`): **`none`** (everyone is `anon` with write and admin — `validate` refuses
-  unless `server.listen` is loopback), **`jwt`**, **`introspect`**, and **`forwarded`**.
+- Five auth modes (`server.auth_mode`): **`none`** (everyone is `anon` with write and admin — `validate` refuses
+  unless `server.listen` is loopback), **`jwt`**, **`introspect`**, **`forwarded`**, and **`introspect_forwarded`** (D48).
   JWT mode accepts EdDSA tokens from a Git Basic password or API Bearer header, verifies `[auth.jwt]` public-key
   PEM or cached JWKS plus issuer/audience/times, and applies `<owner>/<repo>:read|write|admin` scopes.
   Introspect mode sends the same Basic password or Bearer credential to `[auth.introspect].url` as JSON
@@ -74,6 +74,8 @@ decisions numbered in §4 here); this file keeps the rules.
   `X-Gitcask-Principal`/`-Write`/`-Admin` headers are ignored. In forwarded mode the authenticating proxy supplies
   `X-Gitcask-Principal`; `X-Gitcask-Write: 1` and `X-Gitcask-Admin: 1` grant those permissions. If
   `GITCASK_FORWARD_SECRET` is set, `X-Gitcask-Forward-Secret` must match it. `Authorization` is ignored.
+  Combined mode requires both configurations and selects exactly one identity per request;
+  [SECURITY.md](SECURITY.md#mixed-direct-and-trusted-proxy-authentication) defines precedence and the proxy boundary.
 - `/healthz` and `/readyz` are open at the application. Everything else requires valid credentials.
 - **An edge announces byte offload, per request, in `X-Gitcask-Capabilities`** (D39): `accel-redirect` means
   static bytes may be served by `X-Accel-Redirect`, honoured only when
@@ -319,6 +321,16 @@ decision in §4 — or the PR is; never "fix later".
   are uncached 503 + `Retry-After: 5`; 401/403 from the issuer warns that the service secret was rejected.
   The request timeout defaults to 2 s and is capped at 10 s. The bounded cache and flight table are the only
   new state; no bucket requests are added. `forwarded` remains for trusted IdP-proxy deployments.
+
+- **D48** **Introspection and trusted forwarding may share one listener** (2026-09-21; extends D47).
+  Explicit `server.auth_mode = "introspect_forwarded"` requires valid introspection settings and a non-empty,
+  printable ASCII `GITCASK_FORWARD_SECRET` without whitespace at startup. A present proxy-secret header
+  selects forwarding only after constant-time verification; any invalid, empty or repeated secret fails
+  closed, with no token fallback. An absent secret selects the existing bounded introspection client and
+  repository scopes, ignoring forwarded grants. A trusted proxy identity wins over `Authorization` and
+  must supply a principal; privileges never merge. Standalone modes retain their contracts. No bucket
+  requests, routes, ports or identity state are added. The precise error semantics and mandatory proxy
+  header stripping live in [SECURITY.md](SECURITY.md#mixed-direct-and-trusted-proxy-authentication).
 
 Decision identifiers are stable; gaps in the numbering are intentional.
 

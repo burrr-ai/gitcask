@@ -133,8 +133,22 @@ pub enum AuthMode {
     Jwt,
     /// Verify opaque tokens with the issuer and apply the same repository scopes.
     Introspect,
+    /// Select introspection or secret-verified forwarding per request.
+    IntrospectForwarded,
     /// Trust identity and permission headers injected by the front proxy.
     Forwarded,
+}
+
+/// Read the required shared proxy secret for combined authentication. Discard
+/// environment errors because `VarError::NotUnicode` contains the secret value.
+pub fn required_forward_secret() -> Result<String> {
+    let secret = std::env::var("GITCASK_FORWARD_SECRET")
+        .map_err(|_| anyhow::anyhow!("introspect_forwarded requires GITCASK_FORWARD_SECRET"))?;
+    anyhow::ensure!(
+        !secret.is_empty() && secret.bytes().all(|byte| byte.is_ascii_graphic()),
+        "introspect_forwarded requires a non-empty printable ASCII GITCASK_FORWARD_SECRET without whitespace"
+    );
+    Ok(secret)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -724,7 +738,10 @@ impl Config {
                 );
             }
         }
-        if self.server.auth_mode == AuthMode::Introspect {
+        if matches!(
+            self.server.auth_mode,
+            AuthMode::Introspect | AuthMode::IntrospectForwarded
+        ) {
             let introspect = &self.auth.introspect;
             anyhow::ensure!(
                 secure_auth_url(&introspect.url),
@@ -741,6 +758,14 @@ impl Config {
             anyhow::ensure!(
                 !introspect.timeout.is_zero() && introspect.timeout <= Duration::from_secs(10),
                 "auth.introspect.timeout must be greater than zero and at most 10s"
+            );
+        }
+        if self.server.auth_mode == AuthMode::IntrospectForwarded {
+            required_forward_secret()?;
+            anyhow::ensure!(
+                std::env::var(&self.auth.introspect.secret_env)
+                    .is_ok_and(|secret| secret.bytes().all(|byte| byte.is_ascii_graphic())),
+                "introspect_forwarded requires a printable ASCII introspection service secret without whitespace"
             );
         }
         if let Some(u) = &self.server.public_url {
@@ -765,7 +790,7 @@ impl Config {
         if self.server.auth_mode == AuthMode::None {
             anyhow::ensure!(
                 self.server.listen.ip().is_loopback(),
-                "server.auth_mode = none is loopback-only (listen is {}); use jwt, introspect or forwarded for a public bind",
+                "server.auth_mode = none is loopback-only (listen is {}); use jwt, introspect, forwarded or introspect_forwarded for a public bind",
                 self.server.listen
             );
         }
@@ -1091,6 +1116,83 @@ secret_env = "CARGO_PKG_NAME"
                     .contains("secret_env")
             );
         }
+    }
+
+    #[test]
+    fn introspect_forwarded_startup_validation() -> Result<()> {
+        const CHILD: &str = "GITCASK_TEST_COMBINED_CONFIG_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Each child owns its environment, even under parallel cargo test.
+            for secret in [
+                None,
+                Some(""),
+                Some(" "),
+                Some("bad\nsecret"),
+                Some("é"),
+                Some("proxy-secret"),
+            ] {
+                let mut command = std::process::Command::new(std::env::current_exe()?);
+                command
+                    .args(["--exact", "tests::introspect_forwarded_startup_validation"])
+                    .env(CHILD, "1")
+                    .env("GITCASK_TEST_COMBINED_EMPTY", "")
+                    .env("GITCASK_TEST_COMBINED_INVALID", "bad\nservice-secret")
+                    .env_remove("GITCASK_FORWARD_SECRET");
+                if let Some(secret) = secret {
+                    command.env("GITCASK_FORWARD_SECRET", secret);
+                }
+                assert!(command.status()?.success());
+            }
+            return Ok(());
+        }
+        let mut config = Config::default();
+        config.server.auth_mode = AuthMode::IntrospectForwarded;
+        config.auth.introspect.url = "https://issuer.example/introspect".into();
+        config.auth.introspect.secret_env = "CARGO_PKG_NAME".into();
+        if std::env::var("GITCASK_FORWARD_SECRET").as_deref() != Ok("proxy-secret") {
+            let error = config.validate().expect_err("invalid proxy secret");
+            assert!(error.to_string().contains("GITCASK_FORWARD_SECRET"));
+            return Ok(());
+        }
+        config.validate()?;
+        let parsed = Config::parse(
+            r#"
+[server]
+auth_mode = "introspect_forwarded"
+[auth.introspect]
+url = "https://issuer.example/introspect"
+secret_env = "CARGO_PKG_NAME"
+"#,
+        )?;
+        assert_eq!(parsed.server.auth_mode, AuthMode::IntrospectForwarded);
+        for url in [
+            "",
+            "http://issuer.example/i",
+            "https://user:pass@issuer.example/i",
+        ] {
+            config.auth.introspect.url = url.into();
+            assert!(config.validate().is_err());
+        }
+        config.auth.introspect.url = "https://issuer.example/i".into();
+        for name in [
+            "",
+            "GITCASK_TEST_UNSET_COMBINED",
+            "INVALID=NAME",
+            "GITCASK_TEST_COMBINED_EMPTY",
+            "GITCASK_TEST_COMBINED_INVALID",
+        ] {
+            config.auth.introspect.secret_env = name.into();
+            assert!(config.validate().is_err());
+        }
+        config.auth.introspect.secret_env = "CARGO_PKG_NAME".into();
+        config.auth.introspect.cache_ttl = Duration::from_secs(601);
+        assert!(config.validate().is_err());
+        config.auth.introspect.cache_ttl = Duration::ZERO;
+        for timeout in [Duration::ZERO, Duration::from_secs(11)] {
+            config.auth.introspect.timeout = timeout;
+            assert!(config.validate().is_err());
+        }
+        Ok(())
     }
 
     #[test]

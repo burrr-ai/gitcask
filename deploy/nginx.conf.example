@@ -1,7 +1,10 @@
 # deploy/nginx.conf.example — the front-proxy contract for gitcask.
 #
 # The proxy terminates public TLS, rate-limits, and optionally caches immutable bytes.
-# gitcask itself verifies the client's Ed25519 JWT from Authorization; nginx preserves it.
+# gitcask verifies the client's JWT or introspects its token; nginx preserves Authorization.
+# This is a byte/TLS proxy, not an identity provider. It strips identity/secret inputs below.
+# For an authenticating proxy in introspect_forwarded mode, follow SECURITY.md before
+# replacing those empty values with verified identity, grants and the shared proxy secret.
 #
 # It also demonstrates **byte offload with a disk cache (`X-Accel-Redirect`)**: LFS objects are
 #      big, immutable and content-addressed. With this config gitcask still
@@ -82,6 +85,10 @@ http {
             proxy_set_header Host $host;
             proxy_set_header X-Forwarded-Proto https;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Gitcask-Principal "";
+            proxy_set_header X-Gitcask-Write "";
+            proxy_set_header X-Gitcask-Admin "";
+            proxy_set_header X-Gitcask-Forward-Secret "";
             proxy_set_header X-Gitcask-Capabilities "accel-redirect";
             proxy_set_header Connection "";
             proxy_buffering off;               # git and SSE are streams

@@ -5,8 +5,8 @@
 # Validate with: gitcask config check gitcask.toml
 
 [server]
-listen = "127.0.0.1:8080"        # default; `auth_mode = none` is refused unless this is loopback. Public bind: 0.0.0.0 with jwt/introspect/forwarded.
-auth_mode = "none"                # "none" | "jwt" | "introspect" | "forwarded"; none grants write+admin and is loopback-only
+listen = "127.0.0.1:8080"        # default; `auth_mode = none` is refused unless this is loopback. Public bind: 0.0.0.0 with jwt/introspect/forwarded/introspect_forwarded.
+auth_mode = "none"                # "none" | "jwt" | "introspect" | "forwarded" | "introspect_forwarded"; none grants write+admin and is loopback-only
 max_concurrent_requests = 512     # global cap on in-flight git requests
 max_concurrent_per_repo = 64      # per-repo cap (upload-pack / receive-pack)
 request_timeout = "1h"
@@ -32,6 +32,13 @@ accel_redirect = false            # behind an nginx edge that announces `X-Gitca
 # forwarded requires X-Gitcask-Principal from the front proxy; X-Gitcask-Write: 1
 # and X-Gitcask-Admin: 1 grant permissions. Set GITCASK_FORWARD_SECRET to require
 # the matching X-Gitcask-Forward-Secret header. Authorization is ignored in that mode.
+# introspect_forwarded uses both schemes on this listener: [auth.introspect] and
+# GITCASK_FORWARD_SECRET are REQUIRED at startup; both secrets must be non-empty printable
+# ASCII without whitespace.
+# Absent proxy secret header -> introspection; present invalid/empty/repeated -> 401, no fallback;
+# valid -> forwarded principal/grants only, ignoring Authorization. Never combine privileges.
+# Proxies must strip client identity/grant/secret headers before injecting their own.
+# Full precedence, trust boundary and error semantics: SECURITY.md.
 
 [auth.jwt]                         # used when server.auth_mode = "jwt"; EdDSA (Ed25519) only
 # Exactly one key source: a cached remote JWKS, or a public-key PEM/path.
@@ -54,7 +61,7 @@ leeway = "60s"                    # exp/iat/nbf clock skew
 # There is no revocation list by design (that would be state). Pay for it with narrow scopes
 # instead: one repository, the least permission that works.
 
-[auth.introspect]                 # used when server.auth_mode = "introspect"; opaque tokens
+[auth.introspect]                 # used in introspect and introspect_forwarded modes; opaque tokens
 url = ""                         # required: HTTPS endpoint, or HTTP on loopback for local development
 secret_env = ""                  # required: name of a set, non-empty env var; never put the secret here
 cache_ttl = "30s"                 # positive answer cap, <= 10m; 0s disables positive caching

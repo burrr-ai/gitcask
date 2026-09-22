@@ -73,6 +73,8 @@ be writable by that user. S3 credentials are currently read from environment var
 IAM role discovery and automatic temporary-credential refresh are not implemented.
 
 Platforms with opaque tokens use `server.auth_mode = "introspect"` and configure their introspection endpoint in [`gitcask.example.toml`](gitcask.example.toml).
+To accept direct tokens and trusted proxy requests on the same listener, opt into `introspect_forwarded`;
+see [precedence and proxy setup](SECURITY.md#mixed-direct-and-trusted-proxy-authentication).
 
 ```sh
 # build (needs the Rust version in rust-toolchain.toml, plus protoc)

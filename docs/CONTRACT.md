@@ -24,8 +24,11 @@ Read `AGENTS.md` first (design §1–§2, decisions §3; the original layout/pha
   `ObjectStoreExt`, `Prefixed`, `memory::MemoryStore`, `util::{collect,once,file_stream,backoff,retry}`),
   modules `coord.rs`, `s3.rs`, and test-only `fault.rs` / `memory.rs`.
 - `gitcask-config`: `Config` for gitcask.toml (+ `GITCASK__` env overrides, `PORT`).
-  `AuthMode::{None,Jwt,Introspect,Forwarded}`; `AuthConfig::{jwt,introspect}`. `IntrospectConfig` holds
+  `AuthMode::{None,Jwt,Introspect,Forwarded,IntrospectForwarded}`; `AuthConfig::{jwt,introspect}`. `IntrospectConfig` holds
   `url`, `secret_env`, `cache_ttl`, `negative_cache_ttl`, `timeout`; the secret value is never config data.
+  `required_forward_secret() -> anyhow::Result<String>` reads and validates the required proxy secret for
+  combined mode without including its value in errors. `Config::validate` checks both auth configurations.
+  Request selection and errors: [SECURITY.md](../SECURITY.md#mixed-direct-and-trusted-proxy-authentication).
 
 ## gitcask-git (owner: GitEngine)
 
@@ -242,7 +245,9 @@ pub async fn serve(state: Arc<AppState>, shutdown: impl Future<Output=()> + Send
 //   PUT  /  (create repo, write permission)   DELETE / (admin permission)
 // Non-repo: GET /healthz /readyz /metrics
 // Auth: EdDSA JWT from Git Basic password / API Bearer is verified against public PEM or cached JWKS and
-// repository scopes are checked by require_read/write/admin. Forwarded mode remains optional. Endpoints
+// repository scopes are checked by require_read/write/admin. Introspection uses the same scopes;
+// IntrospectForwarded selects one scheme per request. Permission checks follow the resolved principal
+// (scoped token or forwarded grants), never the configured mode alone. Endpoints
 // synchronize refs only or the complete local pack set (AGENTS.md §2.3).
 ```
 

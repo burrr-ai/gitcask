@@ -170,5 +170,7 @@ deployment.
 | D13 | product boundary and the gate | (2026-09-01, **superseded by D14**) authentication lived in a separate gate process in the OSS core. Retired by task 34 to remove the trusted headers, the duplicated path-to-permission table and the second process |
 | D14 | product boundary and JWT | (2026-09-01) the OSS core = auth · git transport · read/write API. gitcask verifies EdDSA JWT signatures and repository scopes itself but **owns no identity**; issuance belongs to the platform or the offline CLI. The cloud = multi-tenancy · billing · operations. CI, issues, PRs, UI and repository listing are out of scope |
 
-Both platform backends and users' git CLIs send tokens to the same single gitcask process. Only deployments
-that already have their own IdP proxy choose `server.auth_mode = "forwarded"`.
+Both platform backends and users' git CLIs send tokens to the same single gitcask process. Deployments
+with their own IdP proxy can use `forwarded`, or explicitly opt into `introspect_forwarded` for mixed
+direct-token and trusted-proxy traffic on that listener (AGENTS D48;
+[security contract](../SECURITY.md#mixed-direct-and-trusted-proxy-authentication)).

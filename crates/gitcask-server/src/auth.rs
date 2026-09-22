@@ -179,9 +179,14 @@ impl Principal {
 
 enum Backend {
     None,
-    Forwarded { forward_secret: Option<String> },
+    Forwarded {
+        forward_secret: Option<String>,
+    },
     Jwt(Box<JwtVerifier>),
-    Introspect(IntrospectClient),
+    Introspect {
+        client: IntrospectClient,
+        forward_secret: Option<String>,
+    },
 }
 
 /// Pluggable authenticator backed by [`gitcask_config::AuthMode`].
@@ -199,7 +204,18 @@ impl Authenticator {
                     .filter(|value| !value.is_empty()),
             },
             AuthMode::Jwt => Backend::Jwt(Box::new(JwtVerifier::new(&cfg.auth.jwt).await?)),
-            AuthMode::Introspect => Backend::Introspect(IntrospectClient::new(&cfg.auth.introspect)?),
+            AuthMode::Introspect | AuthMode::IntrospectForwarded => {
+                let forward_secret = if cfg.server.auth_mode == AuthMode::IntrospectForwarded {
+                    cfg.validate()?;
+                    Some(gitcask_config::required_forward_secret()?)
+                } else {
+                    None
+                };
+                Backend::Introspect {
+                    client: IntrospectClient::new(&cfg.auth.introspect)?,
+                    forward_secret,
+                }
+            }
         };
         Ok(Arc::new(Self { backend }))
     }
@@ -223,9 +239,23 @@ impl Authenticator {
                     AuthError::Unauthorized
                 })?
             }
-            Backend::Introspect(client) => {
-                let credential = client_credential(headers).ok_or(AuthError::Unauthorized)?;
-                client.verify(&credential).await?
+            Backend::Introspect {
+                client,
+                forward_secret,
+            } => {
+                // Presence selects the proxy attempt, even when its value is
+                // empty/invalid. Never fall back to a token after proxy failure.
+                if let Some(secret) = forward_secret
+                    && headers.contains_key(FORWARD_SECRET_HEADER)
+                {
+                    if headers.get_all(FORWARD_SECRET_HEADER).iter().count() != 1 {
+                        return Err(AuthError::Unauthorized);
+                    }
+                    forwarded(headers, Some(secret))?
+                } else {
+                    let credential = client_credential(headers).ok_or(AuthError::Unauthorized)?;
+                    client.verify(&credential).await?
+                }
             }
         };
         tracing::Span::current().record("principal", principal.name.as_str());
@@ -240,7 +270,9 @@ impl Authenticator {
         required: Permission,
     ) -> Result<Principal, AuthError> {
         let mut principal = self.authenticate(headers).await?;
-        if matches!(&self.backend, Backend::Jwt(_) | Backend::Introspect(_)) {
+        // Combined mode can resolve either kind of principal. Only token
+        // principals carry scopes; forwarded grants stay independent flags.
+        if principal.scopes.is_some() {
             let repository = Repository::new(owner, repo).ok_or(AuthError::NotFound)?;
             let granted = principal
                 .permission_for(&repository)

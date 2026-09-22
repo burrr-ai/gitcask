@@ -31,7 +31,8 @@ comwit is gitcask's first user and the workload that shaped it; the architecture
    live in the calling platform's database. gitcask verifies EdDSA JWTs with a public key/JWKS or introspects
    opaque tokens with their issuer, then applies the same repository scopes; it never stores users,
    sessions, revocations, or a signing key. It exposes create/delete for the platform to call.
-   There is no login, no token store, no repository listing.
+   There is no login, no token store, no repository listing. Direct tokens and a trusted proxy can share
+   one process with explicit `introspect_forwarded` mode ([security contract](SECURITY.md#mixed-direct-and-trusted-proxy-authentication)).
 5. **All the features a git host needs, and only those**: smart HTTP v0/v2 (ls-refs, fetch with
    filter/shallow/deepen, receive-pack atomic/delete/tags/push-options/report-status-v2), LFS,
    `<owner>/<repo>` namespaces, ref events to a webhook, a JSON API for browsing and deterministic Git writes,
@@ -55,7 +56,7 @@ comwit is gitcask's first user and the workload that shaped it; the architecture
 | Push | acknowledged only after the bucket ACKs; one CAS per batch; 5 store requests on the happy path |
 | Consistency | push then fetch anywhere sees it; concurrent pushers: exactly one winner (the simulation suite) |
 | Cost model | a maintainer pass touches only repositories with a pending marker; no periodic LIST of `repos/` anywhere |
-| Security | in `jwt`/`introspect` modes every route but `/healthz` and `/readyz` requires a valid token and repo routes require scope; introspection-service failures are 503, never grants; `forwarded` remains available; `none` binds loopback only |
+| Security | in `jwt`/`introspect` modes every route but `/healthz` and `/readyz` requires a valid token and repo routes require scope; introspection-service failures are 503, never grants; `introspect_forwarded` selects one verified identity per request (AGENTS D48); `forwarded` remains available; `none` binds loopback only |
 | Transient store errors | 5xx / throttling on any store operation is retried with backoff and never surfaces as a failed push on its own |
 | Data completeness | every object reachable from an advertised ref is in the pack set; `fsck` reports violations |
 
