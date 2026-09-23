@@ -1235,7 +1235,7 @@ async fn combined_permission_checks(client: &reqwest::Client, base: &str) -> Tes
     )
     .await?;
     expect_auth_status(
-        proxy(client.get(format!("{base}/api/v1/openapi.json"))),
+        proxy(client.get(format!("{base}/openapi.json"))),
         200,
     )
     .await?;
@@ -1278,7 +1278,7 @@ async fn introspect_permission_checks(client: &reqwest::Client, base: &str) -> T
         ("/introspect/r/api/refs", "read", 200),
         ("/introspect/r/api/refs", "empty", 404),
         ("/another/r/api/refs", "read", 404),
-        ("/api/v1/openapi.json", "empty", 200),
+        ("/openapi.json", "empty", 200),
         ("/introspect/r/api/refs", "unknown", 401),
     ] {
         assert_eq!(

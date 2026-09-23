@@ -56,7 +56,7 @@ comwit is gitcask's first user and the workload that shaped it; the architecture
 | Push | acknowledged only after the bucket ACKs; one CAS per batch; 5 store requests on the happy path |
 | Consistency | push then fetch anywhere sees it; concurrent pushers: exactly one winner (the simulation suite) |
 | Cost model | a maintainer pass touches only repositories with a pending marker; no periodic LIST of `repos/` anywhere |
-| Security | in `jwt`/`introspect` modes every route but `/healthz` and `/readyz` requires a valid token and repo routes require scope; introspection-service failures are 503, never grants; `introspect_forwarded` selects one verified identity per request (AGENTS D48); `forwarded` remains available; `none` binds loopback only |
+| Security | in `jwt`/`introspect` modes every route but `/healthz`, `/readyz`, and the static API docs (when `server.public_docs = true`) requires a valid token and repo routes require scope; introspection-service failures are 503, never grants; `introspect_forwarded` selects one verified identity per request (AGENTS D48); `forwarded` remains available; `none` binds loopback only |
 | Transient store errors | 5xx / throttling on any store operation is retried with backoff and never surfaces as a failed push on its own |
 | Data completeness | every object reachable from an advertised ref is in the pack set; `fsck` reports violations |
 

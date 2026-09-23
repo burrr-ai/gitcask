@@ -143,7 +143,6 @@ libc = "0.2"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.17", default-features = false, features = ["http-listener"] }
 utoipa = "=5.5.0"
-utoipa-scalar = "=0.3.0"
 
 [profile.release]
 # thin LTO + a few codegen units: near-fat performance, much faster rebuilds

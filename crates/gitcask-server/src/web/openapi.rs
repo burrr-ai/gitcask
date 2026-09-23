@@ -16,13 +16,9 @@ const SCALAR_TEMPLATE: &str = r#"<!doctype html>
 </head>
 <body>
   <div id="app"></div>
-  <script id="api-reference" type="application/json">$spec</script>
   <script>__SCALAR_BUNDLE__</script>
   <script>
-    Scalar.createApiReference(
-      '#app',
-      JSON.parse(document.getElementById('api-reference').textContent)
-    )
+    Scalar.createApiReference('#app', { url: '/openapi.json' })
   </script>
 </body>
 </html>
@@ -123,12 +119,7 @@ pub(crate) async fn openapi_json() -> Json<utoipa::openapi::OpenApi> {
 pub(crate) async fn scalar_docs() -> Html<&'static str> {
     static HTML: OnceLock<String> = OnceLock::new();
     Html(
-        HTML.get_or_init(|| {
-            utoipa_scalar::Scalar::new(<ApiDoc as utoipa::OpenApi>::openapi())
-                .custom_html(SCALAR_TEMPLATE)
-                .to_html()
-                .replace("__SCALAR_BUNDLE__", SCALAR_BUNDLE)
-        })
-        .as_str(),
+        HTML.get_or_init(|| SCALAR_TEMPLATE.replace("__SCALAR_BUNDLE__", SCALAR_BUNDLE))
+            .as_str(),
     )
 }

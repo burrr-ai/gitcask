@@ -61,18 +61,27 @@ async fn json(server: &Server, path: &str) -> anyhow::Result<Value> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn openapi_and_scalar_docs_are_authenticated_and_offline() -> TestResult {
+async fn openapi_and_scalar_docs_are_public_and_offline() -> TestResult {
     let server = Server::start_with_tweak(|cfg| {
         cfg.server.auth_mode = gitcask_config::AuthMode::Forwarded;
+        cfg.store.bucket = "private-bucket-docs-test".into();
+        cfg.events.webhook_secret = Some("private-secret-docs-test".into());
     })
     .await?;
 
-    assert_eq!(get(&server, "/api/v1/openapi.json").await?.0, 401);
-
-    let auth = [("X-Gitcask-Principal", "reader")];
-    let (status, body, headers) = get_h(&server, "/api/v1/openapi.json", &auth).await?;
+    let (status, body, headers) = get_h(&server, "/openapi.json", &[]).await?;
     assert_eq!(status, 200);
     assert!(hdr(&headers, "content-type").starts_with("application/json"));
+    for private_value in [
+        "private-bucket-docs-test",
+        "private-secret-docs-test",
+        server.base_url.as_str(),
+    ] {
+        assert!(
+            !body.contains(private_value),
+            "spec exposed {private_value}"
+        );
+    }
     let spec: Value = serde_json::from_str(&body)?;
     let mut paths: Vec<&str> = spec["paths"]
         .as_object()
@@ -113,13 +122,97 @@ async fn openapi_and_scalar_docs_are_authenticated_and_offline() -> TestResult {
     assert_eq!(schemes["jwt_bearer"]["scheme"], "bearer");
     assert_eq!(schemes["jwt_bearer"]["bearerFormat"], "EdDSA JWT");
 
-    assert_eq!(get(&server, "/api/v1/docs").await?.0, 401);
-    let (status, body, headers) = get_h(&server, "/api/v1/docs", &auth).await?;
+    let (status, body, headers) = get_h(&server, "/docs", &[]).await?;
     assert_eq!(status, 200);
     assert!(hdr(&headers, "content-type").starts_with("text/html"));
     assert!(body.contains("Scalar.createApiReference"));
+    assert!(body.contains("url: '/openapi.json'"));
     assert!(!body.contains("cdn.jsdelivr.net"));
     assert!(!body.contains("<script src=\"http"));
+
+    let no_redirects = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    for (old, new) in [
+        ("/api/v1/docs", "/docs"),
+        ("/api/v1/openapi.json", "/openapi.json"),
+    ] {
+        let response = no_redirects
+            .get(format!("{}{old}", server.base_url))
+            .send()
+            .await?;
+        assert_eq!(response.status(), 308);
+        assert_eq!(response.headers().get("location").unwrap(), new);
+    }
+    assert_eq!(get(&server, "/metrics").await?.0, 401);
+
+    // A repository owner named `docs` still uses the two-segment repo paths.
+    let client = reqwest::Client::new();
+    assert_eq!(
+        client
+            .put(format!("{}/docs/repo", server.base_url))
+            .header("X-Gitcask-Principal", "writer")
+            .header("X-Gitcask-Write", "1")
+            .send()
+            .await?
+            .status(),
+        201
+    );
+    assert_eq!(get(&server, "/docs/repo/api").await?.0, 401);
+    assert_eq!(
+        get_h(
+            &server,
+            "/docs/repo/api",
+            &[("X-Gitcask-Principal", "reader")]
+        )
+        .await?
+        .0,
+        200
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn public_docs_false_requires_auth_before_redirecting() -> TestResult {
+    let server = Server::start_with_tweak(|cfg| {
+        cfg.server.auth_mode = gitcask_config::AuthMode::Forwarded;
+        cfg.server.public_docs = false;
+    })
+    .await?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    for path in [
+        "/docs",
+        "/openapi.json",
+        "/api/v1/docs",
+        "/api/v1/openapi.json",
+    ] {
+        let url = format!("{}{path}", server.base_url);
+        assert_eq!(client.get(&url).send().await?.status(), 401, "{path}");
+        let authorized = client
+            .get(&url)
+            .header("X-Gitcask-Principal", "reader")
+            .send()
+            .await?;
+        assert_eq!(
+            authorized.status(),
+            if path.starts_with("/api/v1/") {
+                308
+            } else {
+                200
+            },
+            "{path}"
+        );
+    }
+    assert_eq!(
+        client
+            .get(format!("{}/metrics", server.base_url))
+            .send()
+            .await?
+            .status(),
+        401
+    );
     Ok(())
 }
 
@@ -542,7 +635,7 @@ async fn compare_api() -> TestResult {
 
     // Divergent slash-containing branch names use the first literal `...`.
     let compared = json(&server, "/o/compare/api/compare/base/side...feature/x").await?;
-    let spec = json(&server, "/api/v1/openapi.json").await?;
+    let spec = json(&server, "/openapi.json").await?;
     let actual_fields: std::collections::BTreeSet<&str> = compared
         .as_object()
         .unwrap()

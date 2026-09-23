@@ -243,7 +243,10 @@ pub async fn serve(state: Arc<AppState>, shutdown: impl Future<Output=()> + Send
 //   GET  /HEAD  GET /objects/info/packs (404 unless dumb enabled)
 //   POST /info/lfs/objects/batch  PUT/GET /info/lfs/objects/{oid}  POST /info/lfs/verify
 //   PUT  /  (create repo, write permission)   DELETE / (admin permission)
-// Non-repo: GET /healthz /readyz /metrics
+// Non-repo: GET /healthz /readyz /metrics /docs /openapi.json
+// GET /api/v1/docs and /api/v1/openapi.json permanently redirect to /docs and /openapi.json.
+// server.public_docs = true (default) opens all four docs paths; false gates all four.
+// /metrics is always authenticated. Exact one-segment docs routes leave /docs/{repo} available.
 // Auth: EdDSA JWT from Git Basic password / API Bearer is verified against public PEM or cached JWKS and
 // repository scopes are checked by require_read/write/admin. Introspection uses the same scopes;
 // IntrospectForwarded selects one scheme per request. Permission checks follow the resolved principal

@@ -4,7 +4,8 @@
 //! * Repo-scoped routes start with `/{owner}/{repo}` then `/api` or `/api-browser`.
 //! * Lane-first repo forms are **gone**: `/api/v1/repos` and
 //!   `/services/api/{owner}/{repo}` (nginx rewrite of those too).
-//! * Non-repo survivor: `/api/v1` discovery.
+//! * Non-repo paths: `/api/v1` discovery and the exact `/docs` and
+//!   `/openapi.json` documentation routes (with `/api/v1/` redirects).
 //! * Clients must not emit the deleted lane-first repo forms.
 
 use std::fs;
@@ -23,7 +24,7 @@ fn read(rel: &str) -> String {
 /// Non-repo routes only (AGENTS.md D26). Repo aliases are **not** allowed.
 fn allowed_route(path: &str) -> bool {
     let p = path.trim();
-    let allow = ["/metrics", "/healthz", "/readyz"];
+    let allow = ["/metrics", "/healthz", "/readyz", "/docs", "/openapi.json"];
     if allow.contains(&p) {
         return true;
     }

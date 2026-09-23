@@ -85,6 +85,9 @@ pub struct ServerConfig {
     /// driven by pending markers; `compact` is its sub-role). Empty = all.
     pub roles: Vec<Role>,
     pub auth_mode: AuthMode,
+    /// Serve `/docs` and `/openapi.json` without credentials (including redirects
+    /// from their `/api/v1/` paths). Disable to require authentication.
+    pub public_docs: bool,
     /// Public base URL used when rendering absolute LFS URIs.
     pub public_url: Option<String>,
     /// Create a repo on the first receive-pack push if it does not exist.
@@ -485,6 +488,7 @@ impl Default for ServerConfig {
             max_push_bytes: ByteSize::gib(64),
             roles: vec![],
             auth_mode: AuthMode::None,
+            public_docs: true,
             public_url: None,
             auto_create_on_push: false,
             accel_redirect: false,

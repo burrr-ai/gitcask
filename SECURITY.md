@@ -50,7 +50,12 @@ the requested repository and operation before supplying them.
 Missing/invalid user credentials or invalid proxy credentials return 401 with
 `WWW-Authenticate: Basic realm="gitcask"`. Introspection service failures return 503 with `Retry-After: 5`
 and no authentication challenge; valid forwarded requests continue working during an issuer outage.
-`/healthz` and `/readyz` remain open. Authentication adds no bucket requests.
+`/healthz` and `/readyz` remain open. With `server.public_docs = true` (default),
+`GET /docs`, `GET /openapi.json`, and the permanent redirects from their `/api/v1/` paths
+are also open. Set `server.public_docs = false` to require authentication for all four.
+The OpenAPI schema is built from source annotations and contains no runtime secrets,
+bucket names, or internal service addresses. `/metrics` remains authenticated.
+Authentication adds no bucket requests.
 
 The authenticating proxy **must strip every client-supplied `X-Gitcask-Principal`, `X-Gitcask-Write`,
 `X-Gitcask-Admin` and `X-Gitcask-Forward-Secret` header**, including duplicates, before injecting its own

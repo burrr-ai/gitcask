@@ -54,7 +54,6 @@ parking_lot.workspace = true
 moka.workspace = true
 reqwest.workspace = true
 utoipa.workspace = true
-utoipa-scalar.workspace = true
 
 bytesize.workspace = true
 base64.workspace = true
