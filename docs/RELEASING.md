@@ -4,16 +4,23 @@ The release image is `ghcr.io/burrr-ai/gitcask:<version>`, built from the root `
 `linux/amd64` and `linux/arm64`. Releases use `0.0.x` patch versions and Git tags named `v0.0.x`.
 Deploy an exact patch tag or digest; no floating `latest`, `0`, or `0.0` image tags are published.
 
+Every protected `main` push also builds amd64 and arm64 images in the immutable ECR repository
+`188382150131.dkr.ecr.ap-northeast-2.amazonaws.com/gitcask`, scans both platforms, and uploads
+`gitcask-build-evidence.json` plus the Trivy report to the successful **Release** workflow run.
+Set the non-secret repository variables `GITCASK_RELEASE_ROLE_ARN` (GitHub OIDC role) and
+`GITCASK_ECR_REPOSITORY_URI` (that ECR URI) before publishing.
+
 ## Prepare and publish
 
 1. Change `[workspace.package].version` in `Cargo.toml` to the next unused patch version and run
    `cargo update --workspace` with the pinned toolchain to update the workspace entries in `Cargo.lock`.
    Update the image version shown in both READMEs.
-2. Merge the release preparation PR after CI passes. The release tag must point to a commit on `main`.
-3. Tag that commit and push the tag, for example:
+2. Merge the release preparation PR after CI passes. Wait for the protected-`main` **Release** push run
+   to succeed and upload its ECR evidence for the exact merge commit.
+3. Create a lightweight `v0.0.N` tag directly on that qualified `main` commit and push it, for example:
 
    ```sh
-   git tag -a v0.0.1 -m 'gitcask 0.0.1' <merged-commit>
+   git tag v0.0.1 <merged-commit>
    git push origin v0.0.1
    ```
 
