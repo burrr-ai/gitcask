@@ -92,6 +92,12 @@ Platforms with opaque tokens use `server.auth_mode = "introspect"` and configure
 To accept direct tokens and trusted proxy requests on the same listener, opt into `introspect_forwarded`;
 see [precedence and proxy setup](SECURITY.md#mixed-direct-and-trusted-proxy-authentication).
 
+Browse the API reference at `GET /docs` or fetch its OpenAPI schema at `GET /openapi.json`.
+Both are public by default; set `[server] public_docs = false` to require authentication.
+Existing `/api/v1/docs` and `/api/v1/openapi.json` links permanently redirect to the new paths.
+`/metrics` always requires authentication. The exact top-level docs paths leave owners named
+`docs` and `openapi.json` available under `/{owner}/{repo}`.
+
 ```sh
 # build (needs the Rust version in rust-toolchain.toml, plus protoc)
 cargo build --release -p gitcask-cli

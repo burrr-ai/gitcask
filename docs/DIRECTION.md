@@ -128,6 +128,7 @@ The removals were carried out as the scoped tasks listed in §5.
 | 36 rename repohub → gitcask across crates, config, metrics, headers and docs; relicense MIT → Apache-2.0 with NOTICE | ✅ merged (2026-09-01, public release) |
 | 37 port upstream fixes: verify tips on empty-pack pushes (walgit d5e75caf); un-blind `just warnings` under forced colour (walgit b81b15ae) | ✅ merged (PR #2) |
 | 38 `auth_mode = "introspect"` — opaque tokens verified by RFC 7662 token introspection, bounded in-memory cache, 503 on introspection outage | ✅ merged (PR #4) |
+| 39 public API docs — `/docs` and `/openapi.json` open by default with `server.public_docs`; old docs paths permanently redirect | ✅ implemented |
 | local smoke (`scripts/smoke.sh`, rustfs) | ✅ 63/63 — includes introspect phase 4; re-run on every merge |
 | `AGENTS.md` / `GOAL.md` / `README.md` rewrites | ✅ |
 

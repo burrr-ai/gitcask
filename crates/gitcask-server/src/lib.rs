@@ -89,9 +89,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .br(true)
         .gzip(true)
         .quality(tower_http::CompressionLevel::Fastest);
-    // Nothing with content is public: repository handlers perform their own
-    // `require_read`/`require_write`/`require_admin`; top-level metrics/docs use
-    // `web::require_auth`.
+    // Repository handlers perform their own permission checks. Metrics always
+    // requires authentication; the docs routes follow `server.public_docs`.
     // `/healthz` and `/readyz` stay open: a startup probe carries no
     // credentials (a 401 there means no revision can ever start — seen 2026-08-20),
     // and they expose only a status word.
@@ -155,14 +154,26 @@ pub fn router(state: Arc<AppState>) -> Router {
             state.clone(),
             web::require_auth,
         ));
-    let docs_gated = Router::new()
-        .route("/api/v1/openapi.json", get(web::openapi::openapi_json))
-        .route("/api/v1/docs", get(web::openapi::scalar_docs))
-        .layer(web_compression.clone())
-        .layer(axum::middleware::from_fn_with_state(
+    let docs = Router::new()
+        .route("/openapi.json", get(web::openapi::openapi_json))
+        .route("/docs", get(web::openapi::scalar_docs))
+        .route(
+            "/api/v1/openapi.json",
+            get(|| async { axum::response::Redirect::permanent("/openapi.json") }),
+        )
+        .route(
+            "/api/v1/docs",
+            get(|| async { axum::response::Redirect::permanent("/docs") }),
+        )
+        .layer(web_compression.clone());
+    let docs = if state.cfg.server.public_docs {
+        docs
+    } else {
+        docs.layer(axum::middleware::from_fn_with_state(
             state.clone(),
             web::require_auth,
-        ));
+        ))
+    };
     let inner = Router::new()
         .merge(
             Router::new()
@@ -170,7 +181,7 @@ pub fn router(state: Arc<AppState>) -> Router {
                 .route(&format!("{}/", web::v1::API_V1), get(web::v1::discovery))
                 .layer(web_compression),
         )
-        .merge(docs_gated)
+        .merge(docs)
         .merge(top_gated)
         .route("/healthz", get(health::healthz))
         .route("/readyz", get(health::readyz))

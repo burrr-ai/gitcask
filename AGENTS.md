@@ -76,7 +76,10 @@ decisions numbered in §4 here); this file keeps the rules.
   `GITCASK_FORWARD_SECRET` is set, `X-Gitcask-Forward-Secret` must match it. `Authorization` is ignored.
   Combined mode requires both configurations and selects exactly one identity per request;
   [SECURITY.md](SECURITY.md#mixed-direct-and-trusted-proxy-authentication) defines precedence and the proxy boundary.
-- `/healthz` and `/readyz` are open at the application. Everything else requires valid credentials.
+- `/healthz` and `/readyz` are open at the application. With `server.public_docs = true` (default),
+  `/docs` and `/openapi.json` and their permanent redirects under `/api/v1/` are open too;
+  `false` requires valid credentials for all four docs paths. `/metrics` always requires auth.
+  Everything else requires valid credentials.
 - **An edge announces byte offload, per request, in `X-Gitcask-Capabilities`** (D39): `accel-redirect` means
   static bytes may be served by `X-Accel-Redirect`, honoured only when
   `server.accel_redirect = true` **and the TCP peer is loopback**). Hit directly, nothing is assumed.
@@ -338,6 +341,13 @@ decision in §4 — or the PR is; never "fix later".
   chain (environment, profile, ECS task role, IMDS); the configured key environment variable names are ignored.
   Region, endpoint and path-style settings apply in either mode. Presigned URLs and edge byte offload require
   the SDK to obtain signing credentials.
+
+- **D50** **API documentation is public by default** (2026-09-23). Exact `GET /docs` and
+  `GET /openapi.json` serve the bundled Scalar UI and compile-time OpenAPI schema without
+  credentials when `server.public_docs = true` (default). `false` requires authentication
+  on both paths and the permanent `/api/v1/docs` and `/api/v1/openapi.json` redirects.
+  `/metrics` remains protected. These one-segment paths do not consume repository names:
+  `/{owner}/{repo}` remains available with `docs` or `openapi.json` as an owner.
 
 Decision identifiers are stable; gaps in the numbering are intentional.
 

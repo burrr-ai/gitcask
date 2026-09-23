@@ -172,8 +172,8 @@ pub(crate) async fn discovery(
         version: 1,
         base: format!("{base_url}{API_V1}"),
         endpoints: vec![
-            "GET  /api/v1/openapi.json",
-            "GET  /api/v1/docs",
+            "GET  /openapi.json",
+            "GET  /docs",
             "-- repository routes live under the repository: /{owner}/{repo}/api/… and /{owner}/{repo}/api-browser/… --",
             "GET|PUT|DELETE /{owner}/{repo}/api",
             "GET  /{owner}/{repo}/api/refs",

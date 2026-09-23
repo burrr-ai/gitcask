@@ -7,6 +7,7 @@
 [server]
 listen = "127.0.0.1:8080"        # default; `auth_mode = none` is refused unless this is loopback. Public bind: 0.0.0.0 with jwt/introspect/forwarded/introspect_forwarded.
 auth_mode = "none"                # "none" | "jwt" | "introspect" | "forwarded" | "introspect_forwarded"; none grants write+admin and is loopback-only
+public_docs = true                # GET /docs and /openapi.json are open; false requires auth for them and their /api/v1 redirects
 max_concurrent_requests = 512     # global cap on in-flight git requests
 max_concurrent_per_repo = 64      # per-repo cap (upload-pack / receive-pack)
 request_timeout = "1h"
