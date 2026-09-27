@@ -363,24 +363,40 @@ async fn lfs_pointers_fail_closed_and_large_ordinary_blobs_remain_supported() ->
     for version in [
         "https://git-lfs.github.com/spec/v1",
         "https://hawser.github.com/spec/v1",
+        "http://git-media.io/v/2",
     ] {
-        std::fs::write(
-            src.work.path().join("pointer"),
-            format!(
-                "version {version}\noid sha256:{}\nsize 2000\n",
-                "a".repeat(64)
-            ),
-        )?;
-        git_in(src.work.path(), &["add", "."])?;
-        git_in(src.work.path(), &["commit", "-qm", "pointer"])?;
-        git_in(
-            src.work.path(),
-            &["push", "-q", &server.repo_url("seed", "source"), "main"],
-        )?;
-        let pinned = git_in(src.work.path(), &["rev-parse", "HEAD"])?;
-        let (status, response) = initialize(&server, "destination", &body(pinned.trim())).await?;
-        assert_eq!(status, 422, "{response}");
+        let pointer = format!(
+            "version {version}\noid sha256:{}\nsize 2000\n",
+            "a".repeat(64)
+        );
+        for contents in [
+            pointer.clone(),
+            format!("\n{pointer}\n"),
+            pointer.replace('\n', "\r\n"),
+            format!("\u{2000}{pointer}\u{2000}"),
+            format!("ext-0-test sha256:{}\n{pointer}", "b".repeat(64)),
+        ] {
+            std::fs::write(src.work.path().join("pointer"), &contents)?;
+            git_in(src.work.path(), &["add", "."])?;
+            git_in(src.work.path(), &["commit", "-qm", "pointer"])?;
+            git_in(
+                src.work.path(),
+                &["push", "-q", &server.repo_url("seed", "source"), "main"],
+            )?;
+            let pinned = git_in(src.work.path(), &["rev-parse", "HEAD"])?;
+            let (status, response) =
+                initialize(&server, "destination", &body(pinned.trim())).await?;
+            assert_eq!(status, 422, "{contents:?}: {response}");
+        }
     }
+    let target = server
+        .state
+        .registry
+        .open(&RepoId::new("seed", "destination")?)
+        .await?;
+    assert_eq!(target.manifest().head_seq, 0);
+    assert!(target.manifest().initialization.is_none());
+    assert!(target.manifest().packs.is_empty());
     // >1024 bytes is not an LFS pointer; only its tree metadata is inspected.
     std::fs::write(
         src.work.path().join("pointer"),

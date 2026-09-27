@@ -95,8 +95,12 @@ It accepts only Gitcask repository identities, never arbitrary Git URLs, and mak
 no working-tree checkout. Git LFS pointer blobs are rejected before publication,
 even if their payload is present in the source; no clone is reported successfully
 initialized with a missing destination LFS payload. Detection inspects bounded
-small blobs, including the version URL accepted by older Git LFS clients. Empty
-files and ordinary blobs remain supported.
+small regular-file blobs and recognizes all three version URLs accepted by
+Git LFS (`git-lfs.github.com`, `hawser.github.com`, and `git-media.io`), surrounding
+whitespace, CRLF, and extension lines before the version. Recognized headers are
+rejected conservatively even when later pointer fields are malformed. Symlink
+targets are never treated as LFS pointer files. Empty files and ordinary blobs
+remain supported.
 
 Pristine means `head_seq == 0`, no live packs, no log segments, no checkpoint and
 no initialization receipt. A repository with all refs subsequently deleted is

@@ -463,9 +463,7 @@ async fn reject_lfs_pointers(local: &gitcask_git::LocalRepo, tree: &str) -> Resu
         }
         let mut blob = vec![0; size + 1];
         output.read_exact(&mut blob).await.map_err(io_error)?;
-        if blob.starts_with(b"version https://git-lfs.github.com/spec/v1")
-            || blob.starts_with(b"version https://hawser.github.com/spec/v1")
-        {
+        if has_lfs_pointer_header(&blob) {
             return Err(ApiError::UnprocessableEntity(
                 "source tree contains a Git LFS pointer; initialization does not copy LFS payloads"
                     .into(),
@@ -481,4 +479,24 @@ async fn reject_lfs_pointers(local: &gitcask_git::LocalRepo, tree: &str) -> Resu
         ));
     }
     Ok(())
+}
+
+fn has_lfs_pointer_header(blob: &[u8]) -> bool {
+    // git-lfs DecodeFrom trims surrounding Unicode whitespace, accepts CRLF,
+    // and recognizes all three version URLs. Its decoder also allows extension
+    // lines before the version. Reject these headers conservatively, even when
+    // the remaining pointer fields are malformed; no LFS payload is copied.
+    let text = String::from_utf8_lossy(blob);
+    let header = text
+        .trim()
+        .lines()
+        .find(|line| !line.is_empty() && !line.starts_with("ext-"));
+    matches!(
+        header,
+        Some(
+            "version http://git-media.io/v/2"
+                | "version https://hawser.github.com/spec/v1"
+                | "version https://git-lfs.github.com/spec/v1"
+        )
+    )
 }
