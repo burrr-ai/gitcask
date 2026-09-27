@@ -375,7 +375,7 @@ async fn run_fetch<W: tokio::io::AsyncWrite + Unpin + Send>(
     req: gitcask_git::UploadPackRequest,
     writer: W,
 ) -> Result<(), gitcask_git::GitError> {
-    let body = gitcask_git::build_v2_fetch_request(&req);
+    let body = gitcask_git::build_v2_fetch_request(&req, handle.local().object_format());
     handle
         .local()
         .upload_pack_raw(gitcask_git::pkt::Protocol::V2, &body[..], writer)
