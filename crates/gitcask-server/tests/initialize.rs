@@ -72,6 +72,11 @@ async fn source(server: &Server, format: &str) -> Result<Source> {
     )?;
     #[cfg(unix)]
     std::os::unix::fs::symlink("binary", work.path().join("link"))?;
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        "version https://git-lfs.github.com/spec/v1",
+        work.path().join("pointer-like-link"),
+    )?;
     git_in(work.path(), &["add", "."])?;
     git_in(work.path(), &["update-index", "--chmod=+x", "run.sh"])?;
     git_in(
@@ -155,6 +160,16 @@ async fn independent_root_exact_tree_cold_clone_and_normal_git_operations() -> R
         git_in(
             src.work.path(),
             &["push", "-q", &server.repo_url("seed", "source"), "main"],
+        )?;
+        // Replacement refs cannot change the meaning of a pinned object ID.
+        git_in(
+            src.work.path(),
+            &[
+                "push",
+                "-q",
+                &server.repo_url("seed", "source"),
+                &format!("HEAD:refs/replace/{}", src.pinned),
+            ],
         )?;
         let (status, result) = initialize(&server, "destination", &request).await?;
         assert_eq!(status, 201, "{result}");

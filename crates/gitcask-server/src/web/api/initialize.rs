@@ -19,7 +19,7 @@ use crate::{AppState, error::ApiError, sse};
 
 use super::{
     commit::{
-        CommitIdentity, commit_tree, pack_commit_objects_into, rev_parse_tree, run_git,
+        CommitIdentity, commit_tree, ensure_git_success, pack_commit_objects_into, run_git,
         validate_identity,
     },
     write::{mutation_meta, open_write, qualify_ref},
@@ -258,7 +258,12 @@ async fn run_initialization(
         let source_local = source.local().clone();
         let pinned = request.source.commit_oid.clone();
         let tree = tokio::task::spawn_blocking(move || {
-            let kind = run_git(source_local.path(), &["cat-file", "-t", &pinned], &[], None)?;
+            let kind = run_git(
+                source_local.path(),
+                &["--no-replace-objects", "cat-file", "-t", &pinned],
+                &[],
+                None,
+            )?;
             if !kind.status.success() {
                 return Err(ApiError::NotFound("source commit".into()));
             }
@@ -267,7 +272,24 @@ async fn run_initialization(
                     "source object must be a commit".into(),
                 ));
             }
-            rev_parse_tree(source_local.path(), &pinned)
+            // A full OID pins the actual object, regardless of source refs/replace.
+            let expression = format!("{pinned}^{{tree}}");
+            let output = run_git(
+                source_local.path(),
+                &[
+                    "--no-replace-objects",
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    &expression,
+                ],
+                &[],
+                None,
+            )?;
+            ensure_git_success(output.status, &output.stderr, "git rev-parse pinned tree")?;
+            let tree = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            gitcask_git::validate_oid(&tree)?;
+            Ok::<_, ApiError>(tree)
         })
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))??;
@@ -377,6 +399,7 @@ async fn reject_lfs_pointers(local: &gitcask_git::LocalRepo, tree: &str) -> Resu
         command
             .current_dir(local.path())
             .env("GIT_DIR", local.path())
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -417,14 +440,14 @@ async fn reject_lfs_pointers(local: &gitcask_git::LocalRepo, tree: &str) -> Resu
         let mut fields = header
             .split(u8::is_ascii_whitespace)
             .filter(|f| !f.is_empty());
-        let _mode = fields.next();
+        let mode = fields.next();
         let kind = fields.next();
         let oid = fields.next().unwrap_or_default();
         let size = fields
             .next()
             .and_then(|f| std::str::from_utf8(f).ok())
             .and_then(|f| f.parse::<usize>().ok());
-        if kind != Some(b"blob".as_slice()) {
+        if kind != Some(b"blob".as_slice()) || mode == Some(b"120000".as_slice()) {
             continue;
         }
         let size = size.ok_or_else(|| ApiError::Internal("invalid ls-tree blob size".into()))?;

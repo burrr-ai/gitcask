@@ -732,7 +732,7 @@ fn hash_blob(repo: &FsPath, content: &[u8]) -> Result<String, ApiError> {
     parse_oid(&output.stdout, "git hash-object")
 }
 
-pub(super) fn rev_parse_tree(repo: &FsPath, commit: &str) -> Result<String, ApiError> {
+fn rev_parse_tree(repo: &FsPath, commit: &str) -> Result<String, ApiError> {
     let expression = format!("{commit}^{{tree}}");
     let output = run_git(
         repo,

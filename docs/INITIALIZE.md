@@ -21,6 +21,7 @@ cache does not affect the destination.
 SHA-1, 64 for SHA-256), not a branch, tag, expression, or abbreviated ID. Both
 repositories must use the same object format. The source commit need not remain
 a branch tip, but its objects must still be available in the source's live packs.
+Source replacement refs are ignored: the pinned object itself determines the tree.
 `branch` is below `refs/heads/`; initialization also sets symbolic `HEAD` to it.
 An optional `author` has the same shape as `committer` and defaults to it. Identity
 timestamps must include an explicit RFC 3339 offset. No server time is substituted
