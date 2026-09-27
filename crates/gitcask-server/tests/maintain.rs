@@ -920,7 +920,9 @@ async fn compact_repo_reaches_idle_while_checkpoint_only_repos_yield() -> anyhow
         cfg.maintenance.workers = 4;
         cfg.maintenance.max_repos_per_pass = MARKERS;
         cfg.wal.snapshot_every_entries = 0;
-        cfg.wal.checkpoint_interval = std::time::Duration::from_millis(50);
+        // Seed old manifests below instead of racing a 50 ms deadline: the
+        // checkpoint written by this pass must not expire before assertions.
+        cfg.wal.checkpoint_interval = std::time::Duration::from_hours(1);
         cfg.wal.checkpoint_tail_bytes = gitcask_config::ByteSize::b(0);
         cfg.compaction.enabled = true;
         cfg.compaction.trigger_packs = 2;
@@ -941,6 +943,7 @@ async fn compact_repo_reaches_idle_while_checkpoint_only_repos_yield() -> anyhow
                 std::collections::HashMap::new(),
             )
             .await?;
+        age_checkpoint_fixture(&handle).await?;
     }
 
     server.put_repo("fair", "hot").await?;
@@ -962,7 +965,7 @@ async fn compact_repo_reaches_idle_while_checkpoint_only_repos_yield() -> anyhow
     }
 
     let hot = gitcask_git::RepoId::new("fair", "hot")?;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    age_checkpoint_fixture(server.state.registry.open(&hot).await?.as_ref()).await?;
     assert!(
         matches!(
             gitcask_server::maintain::next_unit(&server.state, &hot).await?,
@@ -1000,6 +1003,24 @@ async fn compact_repo_reaches_idle_while_checkpoint_only_repos_yield() -> anyhow
         MARKERS - 1,
         "checkpoint-only repositories keep their markers for the next pass"
     );
+    Ok(())
+}
+
+async fn age_checkpoint_fixture(handle: &gitcask_wal::RepoHandle) -> anyhow::Result<()> {
+    let mut manifest = (*handle.manifest()).clone();
+    manifest.updated_at = Some(gitcask_proto::time::from_system(std::time::UNIX_EPOCH));
+    manifest.revision += 1;
+    let Some(version) = handle.manifest_version() else {
+        anyhow::bail!("fixture manifest has no CAS version");
+    };
+    handle
+        .store()
+        .put(
+            gitcask_proto::keys::MANIFEST,
+            PutBody::Bytes(manifest.encode_to_vec().into()),
+            PutMode::Update(version).into(),
+        )
+        .await?;
     Ok(())
 }
 
