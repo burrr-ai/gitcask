@@ -52,6 +52,18 @@ message Manifest {
   uint64 revision = 11;
   reserved 12;
   reserved "settings";
+  // One successful pristine-repository initialization; preserved by every
+  // subsequent manifest writer, independently of WAL/checkpoint retention.
+  Initialization initialization = 13;
+}
+
+message Initialization {
+  string operation_key = 1;
+  string request_hash = 2;
+  string ref_name = 3;
+  string commit_oid = 4;
+  string tree_oid = 5;
+  uint64 seq = 6;
 }
 
 message LogSegmentRef {

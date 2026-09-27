@@ -587,6 +587,7 @@ impl RepoHandle {
             meta,
             false,
             Some(gitcask_proto::time::from_system(at)),
+            None,
         )
         .await
     }
@@ -598,7 +599,37 @@ impl RepoHandle {
         meta: HashMap<String, String>,
         synced: bool,
     ) -> Result<PublishResult, WalError> {
-        self.enqueue_publish_at(pack, txn, meta, synced, None).await
+        self.enqueue_publish_at(pack, txn, meta, synced, None, None)
+            .await
+    }
+
+    /// Publish a root initialization through the normal publisher, guarded by
+    /// pristine manifest state at every CAS attempt and within the whole batch.
+    /// The caller has synchronized the destination and packed its full closure.
+    pub async fn publish_initialization(
+        &self,
+        pack: gitcask_git::IngestedPack,
+        receipt: gitcask_proto::v1::Initialization,
+        meta: HashMap<String, String>,
+    ) -> Result<PublishResult, WalError> {
+        let txn = gitcask_proto::v1::RefTransaction {
+            updates: vec![
+                gitcask_proto::v1::RefUpdate {
+                    name: receipt.ref_name.clone(),
+                    new_oid: receipt.commit_oid.clone(),
+                    ..Default::default()
+                },
+                gitcask_proto::v1::RefUpdate {
+                    name: "HEAD".into(),
+                    new_symbolic_target: receipt.ref_name.clone(),
+                    ..Default::default()
+                },
+            ],
+            atomic: true,
+            ..Default::default()
+        };
+        self.enqueue_publish_at(Some(pack), txn, meta, true, None, Some(receipt))
+            .await
     }
 
     async fn enqueue_publish_at(
@@ -608,6 +639,7 @@ impl RepoHandle {
         meta: HashMap<String, String>,
         synced: bool,
         created_at: Option<prost_types::Timestamp>,
+        initialization: Option<gitcask_proto::v1::Initialization>,
     ) -> Result<PublishResult, WalError> {
         self.publish_waiters.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -617,6 +649,7 @@ impl RepoHandle {
             meta,
             synced,
             created_at,
+            initialization,
             response: tx,
         };
 

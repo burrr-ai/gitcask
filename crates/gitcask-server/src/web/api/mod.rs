@@ -12,6 +12,7 @@ pub(crate) mod archive;
 pub(crate) mod commit;
 mod git;
 pub(crate) mod handlers;
+pub(crate) mod initialize;
 mod view;
 pub(crate) mod write;
 
@@ -245,6 +246,10 @@ pub fn router(state: Arc<AppState>) -> Router {
                     ))),
             )
             .route(&format!("{base}/merges"), post(merge))
+            .route(
+                &format!("{base}/initialize"),
+                post(initialize::initialize).layer(DefaultBodyLimit::max(64 * 1024)),
+            )
             .route(&format!("{base}/compare/{{*rest}}"), get(compare))
             .route(&format!("{base}/commit/{{sha}}"), get(commit_detail));
     }

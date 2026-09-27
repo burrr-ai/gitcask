@@ -16,6 +16,7 @@ pub enum ApiError {
     Conflict(String),
     PayloadTooLarge,
     UnsupportedMediaType(String),
+    UnprocessableEntity(String),
     Store(Box<gitcask_store::StoreError>),
     Wal(Box<gitcask_wal::WalError>),
     Internal(String),
@@ -32,6 +33,7 @@ impl ApiError {
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::UnsupportedMediaType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            ApiError::UnprocessableEntity(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::Store(error) => match error.as_ref() {
                 gitcask_store::StoreError::Retryable(_) => StatusCode::SERVICE_UNAVAILABLE,
                 gitcask_store::StoreError::NotFound { .. } => StatusCode::NOT_FOUND,
@@ -63,6 +65,7 @@ impl ApiError {
             ApiError::Conflict(m) => format!("conflict: {m}"),
             ApiError::PayloadTooLarge => "payload too large".to_string(),
             ApiError::UnsupportedMediaType(m) => format!("unsupported media type: {m}"),
+            ApiError::UnprocessableEntity(m) => format!("unprocessable entity: {m}"),
             ApiError::Store(error) => match error.as_ref() {
                 gitcask_store::StoreError::NotFound { key } => format!("not found: {key}"),
                 _ => format!("internal error: {error}"),
@@ -106,7 +109,11 @@ impl IntoResponse for ApiError {
             resp.headers_mut().insert(
                 axum::http::header::RETRY_AFTER,
                 axum::http::HeaderValue::from_static(
-                    if matches!(self, Self::IntrospectionUnavailable) { "5" } else { "15" },
+                    if matches!(self, Self::IntrospectionUnavailable) {
+                        "5"
+                    } else {
+                        "15"
+                    },
                 ),
             );
         }
@@ -193,12 +200,18 @@ mod tests {
 
     #[tokio::test]
     async fn introspection_unavailable_is_retryable_without_a_credential_challenge() {
-        let response = ApiError::from(crate::auth::AuthError::IntrospectionUnavailable).into_response();
+        let response =
+            ApiError::from(crate::auth::AuthError::IntrospectionUnavailable).into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.headers().get("retry-after").unwrap(), "5");
         assert!(!response.headers().contains_key("www-authenticate"));
-        let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
-        assert_eq!(&body[..], br#"{"error":"introspection_unavailable","retryable":true}"#);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            &body[..],
+            br#"{"error":"introspection_unavailable","retryable":true}"#
+        );
     }
 
     #[test]

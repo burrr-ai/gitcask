@@ -84,6 +84,7 @@ impl Modify for SecurityAddon {
         crate::web::api::write::delete_tag,
         crate::web::api::write::create_annotated_tag,
         crate::web::api::commit::create_commit,
+        crate::web::api::initialize::initialize,
         crate::web::api::commit::merge,
         crate::web::api::archive::archive,
         crate::web::api::handlers::resolve_root,

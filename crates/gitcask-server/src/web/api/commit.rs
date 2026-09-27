@@ -26,7 +26,8 @@ use super::write::{
 
 const MAX_PATH_BYTES: usize = 4096;
 
-#[derive(Clone, Deserialize, ToSchema)]
+#[derive(Clone, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CommitIdentity {
     name: String,
     email: String,
@@ -368,7 +369,7 @@ fn validate_commit_request(state: &AppState, request: &CommitRequest) -> Result<
     Ok(())
 }
 
-fn validate_identity(identity: &CommitIdentity, field: &str) -> Result<(), ApiError> {
+pub(super) fn validate_identity(identity: &CommitIdentity, field: &str) -> Result<(), ApiError> {
     let invalid_name = identity.name.is_empty()
         || identity
             .name
@@ -731,7 +732,7 @@ fn hash_blob(repo: &FsPath, content: &[u8]) -> Result<String, ApiError> {
     parse_oid(&output.stdout, "git hash-object")
 }
 
-fn rev_parse_tree(repo: &FsPath, commit: &str) -> Result<String, ApiError> {
+pub(super) fn rev_parse_tree(repo: &FsPath, commit: &str) -> Result<String, ApiError> {
     let expression = format!("{commit}^{{tree}}");
     let output = run_git(
         repo,
@@ -756,7 +757,7 @@ fn mktree(repo: &FsPath, entries: &TreeEntries) -> Result<String, ApiError> {
     parse_oid(&output.stdout, "git mktree")
 }
 
-fn commit_tree(
+pub(super) fn commit_tree(
     repo: &FsPath,
     tree: &str,
     parents: &[&str],
@@ -923,7 +924,7 @@ fn parse_oid(bytes: &[u8], command: &str) -> Result<String, ApiError> {
     Ok(oid)
 }
 
-fn ensure_git_success(
+pub(super) fn ensure_git_success(
     status: std::process::ExitStatus,
     stderr: &[u8],
     command: &str,
@@ -938,7 +939,7 @@ fn ensure_git_success(
     )))
 }
 
-fn run_git(
+pub(super) fn run_git(
     repo: &FsPath,
     args: &[&str],
     env: &[(&str, &str)],
@@ -981,6 +982,18 @@ async fn pack_commit_objects(
     commit: &str,
     excludes: &[&str],
 ) -> Result<gitcask_git::IngestedPack, ApiError> {
+    pack_commit_objects_into(state, local, local, commit, excludes).await
+}
+
+/// Stream a complete root-commit closure into another repository without
+/// retaining alternates or importing the source commit's ancestry.
+pub(super) async fn pack_commit_objects_into(
+    state: &AppState,
+    local: &gitcask_git::LocalRepo,
+    destination: &gitcask_git::LocalRepo,
+    commit: &str,
+    excludes: &[&str],
+) -> Result<gitcask_git::IngestedPack, ApiError> {
     let mut command = tokio::process::Command::new("git");
     command
         .current_dir(local.path())
@@ -989,6 +1002,7 @@ async fn pack_commit_objects(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    command.kill_on_drop(true);
     let mut child = command
         .spawn()
         .map_err(|error| ApiError::Internal(format!("git pack-objects: {error}")))?;
@@ -1018,7 +1032,7 @@ async fn pack_commit_objects(
         let mut bytes = Vec::new();
         stderr.read_to_end(&mut bytes).await.map(|_| bytes)
     };
-    let ingest = local.ingest_pack(
+    let ingest = destination.ingest_pack(
         stdout,
         gitcask_git::IngestOptions {
             fsck: state.cfg.wal.fsck_objects,
@@ -1031,6 +1045,14 @@ async fn pack_commit_objects(
         .wait()
         .await
         .map_err(|error| ApiError::Internal(format!("git pack-objects: {error}")))?;
+    let ingest_result = match ingest_result {
+        Err(gitcask_git::GitError::InvalidInput(message))
+            if message.starts_with("pack exceeds max_bytes") =>
+        {
+            return Err(ApiError::PayloadTooLarge);
+        }
+        other => other,
+    };
     feed_result.map_err(|error| ApiError::Internal(format!("git pack-objects stdin: {error}")))?;
     let stderr = stderr_result
         .map_err(|error| ApiError::Internal(format!("git pack-objects stderr: {error}")))?;

@@ -132,8 +132,24 @@ stop; rm -rf "$CACHE"; start
 (git clone -q $BASE/$REPO.git $W/clone2 && [ -f $W/clone2/f ]) && ok "cold clone after cache wipe" || bad "cold clone after cache wipe"
 # maintenance ops visible
 curl -sf $BASE/$REPO/api/overview | head -c 300; echo
+INIT_SOURCE_OID=$(git -C "$W/src" rev-parse HEAD)
+INIT_SOURCE_TREE=$(git -C "$W/src" rev-parse 'HEAD^{tree}')
+python3 - "$INIT_SOURCE_OID" > "$W/initialize.json" <<'PY'
+import json, sys
+json.dump({"source":{"owner":"smoke","repo":"r1","commit_oid":sys.argv[1]},
+           "branch":"main","operation_key":"smoke-init","message":"Independent root",
+           "committer":{"name":"Smoke","email":"smoke@example.test","when":"2026-09-28T00:00:00Z"}}, sys.stdout)
+PY
+check curl -sf -X PUT "$BASE/smoke/initialized"
+init_code=$(curl -s -o "$W/initialized-result.json" -w '%{http_code}' -H 'Content-Type: application/json' -X POST --data-binary @"$W/initialize.json" "$BASE/smoke/initialized/api/initialize")
+[ "$init_code" = 201 ] && ok "initialize pinned tree -> 201" || bad "initialize -> $init_code: $(cat "$W/initialized-result.json")"
 check curl -sf -X DELETE $BASE/$REPO.git
 [ -z "$(s3 ls --recursive s3://gitcask-test/repos/$REPO/)" ] && ok "bucket prefix gone after delete" || bad "bucket prefix gone after delete"
+stop; rm -rf "$CACHE"; start
+(git clone -q "$BASE/smoke/initialized.git" "$W/initialized-clone" && [ "$(git -C "$W/initialized-clone" rev-parse 'HEAD^{tree}')" = "$INIT_SOURCE_TREE" ] && [ "$(git -C "$W/initialized-clone" rev-list --all --count)" = 1 ]) && ok "initialized cold clone survives source deletion with one root and exact tree" || bad "initialized cold clone after source deletion"
+init_code=$(curl -s -o "$W/initialized-replay.json" -w '%{http_code}' -H 'Content-Type: application/json' -X POST --data-binary @"$W/initialize.json" "$BASE/smoke/initialized/api/initialize")
+([ "$init_code" = 200 ] && grep -q '"replayed":true' "$W/initialized-replay.json") && ok "initialize replay after source deletion -> 200" || bad "initialize replay -> $init_code"
+check curl -sf -X DELETE "$BASE/smoke/initialized"
 stop
 
 echo "== phase 2: auth forwarded =="

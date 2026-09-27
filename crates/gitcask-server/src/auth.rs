@@ -168,6 +168,43 @@ fn glob_matches(pattern: &str, value: &str) -> bool {
 }
 
 impl Principal {
+    /// Check source read access with the same resolved identity used for a
+    /// destination write, including zero-TTL introspection answers.
+    pub(crate) fn require_read(&self, owner: &str, repo: &str) -> Result<(), AuthError> {
+        self.clone()
+            .require_permission(owner, repo, Permission::Read)
+            .map(|_| ())
+    }
+
+    fn require_permission(
+        mut self,
+        owner: &str,
+        repo: &str,
+        required: Permission,
+    ) -> Result<Self, AuthError> {
+        // Token principals carry scopes; forwarded grants are independent flags.
+        if self.scopes.is_some() {
+            let repository = Repository::new(owner, repo).ok_or(AuthError::NotFound)?;
+            let granted = self
+                .permission_for(&repository)
+                .filter(|permission| permission.allows(required))
+                .ok_or(AuthError::NotFound)?;
+            self.write = granted.allows(Permission::Write);
+            self.admin = granted.allows(Permission::Admin);
+            return Ok(self);
+        }
+        let allowed = match required {
+            Permission::Read => true,
+            Permission::Write => self.write,
+            Permission::Admin => self.admin,
+        };
+        if allowed {
+            Ok(self)
+        } else {
+            Err(AuthError::Forbidden)
+        }
+    }
+
     fn permission_for(&self, repository: &Repository) -> Option<Permission> {
         self.scopes
             .as_ref()?
@@ -269,29 +306,9 @@ impl Authenticator {
         repo: &str,
         required: Permission,
     ) -> Result<Principal, AuthError> {
-        let mut principal = self.authenticate(headers).await?;
-        // Combined mode can resolve either kind of principal. Only token
-        // principals carry scopes; forwarded grants stay independent flags.
-        if principal.scopes.is_some() {
-            let repository = Repository::new(owner, repo).ok_or(AuthError::NotFound)?;
-            let granted = principal
-                .permission_for(&repository)
-                .filter(|permission| permission.allows(required))
-                .ok_or(AuthError::NotFound)?;
-            principal.write = granted.allows(Permission::Write);
-            principal.admin = granted.allows(Permission::Admin);
-            return Ok(principal);
-        }
-        let allowed = match required {
-            Permission::Read => true,
-            Permission::Write => principal.write,
-            Permission::Admin => principal.admin,
-        };
-        if allowed {
-            Ok(principal)
-        } else {
-            Err(AuthError::Forbidden)
-        }
+        self.authenticate(headers)
+            .await?
+            .require_permission(owner, repo, required)
     }
 
     /// Require `write` for git push, LFS upload, repository creation, and write APIs.

@@ -870,7 +870,7 @@ fn bulk_runtime(worker_threads: usize) -> &'static tokio::runtime::Runtime {
 
 /// Run `fut` on the bulk runtime and await its result from the caller's
 /// runtime. The future must be `'static + Send` (use `Arc<RepoHandle>`).
-pub(crate) async fn on_bulk_runtime<T: Send + 'static>(
+pub async fn on_bulk_runtime<T: Send + 'static>(
     worker_threads: usize,
     fut: impl std::future::Future<Output = Result<T, WalError>> + Send + 'static,
 ) -> Result<T, WalError> {
