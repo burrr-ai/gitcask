@@ -113,6 +113,10 @@ pub enum GitError { Io, Gix(Box<dyn Error+Send+Sync>), Pack, RefConflict{name,ex
                     Fsck(String), Subprocess{cmd,status,stderr}, InvalidInput(String), Protocol(String) }
 ```
 
+`build_v2_fetch_request(req: &UploadPackRequest, format: ObjectFormat)` encodes the
+explicit object-format protocol capability before the v2 delimiter, then the fetch
+arguments. The server supplies its synchronized repository's format.
+
 ## gitcask-store::coord (owner: StoreCoord)
 
 ```rust
@@ -198,6 +202,11 @@ impl RepoHandle {
       -> Result<PublishResult, WalError>;
   pub struct PublishResult { pub seq: u64, pub per_ref: Vec<(String, Result<(), RefError>)> }
   pub async fn publish_ref_update(&self, txn: RefTransaction, meta) -> Result<PublishResult, WalError>;
+  /// Same normal publisher, with a pristine-state precondition on every CAS
+  /// attempt and earlier accepted requests in the batch. Assigns receipt.seq
+  /// and records the receipt in the manifest CAS alongside branch + HEAD.
+  pub async fn publish_initialization(&self, pack: IngestedPack, receipt: Initialization, meta: HashMap<String,String>)
+      -> Result<PublishResult, WalError>;
   /// COMPACT entry: new pack (already local, e.g. from LocalRepo::repack) superseding `supersedes`.
   pub async fn publish_compact(&self, new_pack: PackInfo, supersedes: Vec<gix_hash::ObjectId>, tier: u32)
       -> Result<u64, WalError>;
@@ -216,6 +225,13 @@ pub enum RefError { NonFastForward, Conflict{expected,actual}, Rejected(String),
 ```
 `TaskRecord`, `TaskOutcome`, and `Progress` implement both `Serialize` and `ToSchema`; the server's task JSON
 and OpenAPI components are generated from the same cross-crate types.
+
+`is_pristine(&Manifest)` checks zero head sequence, no packs/logs/checkpoint/receipt.
+`on_bulk_runtime(worker_threads, future)` exposes the existing bounded bulk runtime
+for server-side initialization work; it keeps running if the caller disconnects.
+`Manifest.initialization: Option<Initialization>` is an append-only protobuf field
+carrying one bounded operation key, canonical request hash and original result.
+Every subsequent manifest rewrite must preserve it; see [INITIALIZE.md](INITIALIZE.md).
 
 ## gitcask-server (owner: Server)
 

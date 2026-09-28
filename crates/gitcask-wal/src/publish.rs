@@ -64,6 +64,7 @@ pub(crate) struct PublishRequest {
     /// Explicit entry time (history replay); None = now. Validated monotonic
     /// (>= the head entry's created_at) before the batch is written.
     pub(crate) created_at: Option<prost_types::Timestamp>,
+    pub(crate) initialization: Option<gitcask_proto::v1::Initialization>,
     pub(crate) response: oneshot::Sender<Result<PublishResult, WalError>>,
 }
 
@@ -469,14 +470,24 @@ async fn mark_pending(handle: &RepoHandle) {
     }
 }
 
-fn verify_batch(handle: &RepoHandle, batch: &[PublishRequest]) -> Result<Vec<Verified>, WalError> {
+fn verify_batch(
+    handle: &RepoHandle,
+    batch: &[PublishRequest],
+    manifest: &Manifest,
+) -> Result<Vec<Verified>, WalError> {
     // O(log refs) lookups over the cached snapshot + an overlay of what this
     // batch applied; never an O(refs) map per push.
     let mut working_refs = handle.local.ref_view()?;
     let mut verified = Vec::with_capacity(batch.len());
     let mut floor: Option<std::time::SystemTime> = *handle.last_entry_time.lock();
+    let mut pristine = is_pristine(manifest);
     for req in batch {
         let mut per_ref = verify_txn(&req.txn, &working_refs);
+        if req.initialization.is_some() && !pristine {
+            for (_, result) in &mut per_ref {
+                *result = Err(RefError::Rejected("repository is not pristine".into()));
+            }
+        }
         if let Some(ts) = &req.created_at {
             let t = time::to_system(ts);
             if let Some(f) = floor
@@ -498,10 +509,21 @@ fn verify_batch(handle: &RepoHandle, batch: &[PublishRequest]) -> Result<Vec<Ver
         let valid = per_ref.iter().all(|(_, result)| result.is_ok());
         if valid {
             apply_txn_to_map(&req.txn, &mut working_refs);
+            pristine = false;
         }
         verified.push(Verified { per_ref, valid });
     }
     Ok(verified)
+}
+
+/// Empty refs alone are insufficient: any committed WAL work consumes pristine
+/// state, including a write to another branch or a later deletion of every ref.
+pub fn is_pristine(manifest: &Manifest) -> bool {
+    manifest.head_seq == 0
+        && manifest.packs.is_empty()
+        && manifest.log_segments.is_empty()
+        && manifest.checkpoint.is_none()
+        && manifest.initialization.is_none()
 }
 
 fn build_batch(
@@ -565,7 +587,7 @@ fn updated_manifest(
 }
 
 enum CommitOutcome {
-    Committed(Manifest, Option<gitcask_store::Version>),
+    Committed(Box<Manifest>, Option<gitcask_store::Version>),
     Contended,
     Failed(String, WalError),
 }
@@ -592,7 +614,7 @@ async fn commit_manifest(
         .instrument(span.clone())
         .await;
     match cas {
-        Ok(meta) => CommitOutcome::Committed(updated, Some(meta.version)),
+        Ok(meta) => CommitOutcome::Committed(Box::new(updated), Some(meta.version)),
         Err(StoreError::PreconditionFailed { .. }) => CommitOutcome::Contended,
         Err(error) => match cas_landed(&handle.store, slot)
             .instrument(span.clone())
@@ -600,7 +622,7 @@ async fn commit_manifest(
         {
             Ok(Some(fresh)) => {
                 tracing::warn!(repo = %handle.id, seq = last_seq, "manifest CAS errored but landed: {error}");
-                CommitOutcome::Committed(fresh, None)
+                CommitOutcome::Committed(Box::new(fresh), None)
             }
             Ok(None) => {
                 let message = error.to_string();
@@ -812,15 +834,19 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
         {
             return finish_all_errors(batch, e);
         }
+        // A concurrent sync must not pair an older manifest with a newer CAS
+        // version, or verify against refs from another generation.
+        let sync_guard = handle.sync_mutex.lock().await;
         let manifest = handle.manifest.read().clone();
         let head_seq = manifest.head_seq;
         let known_version = handle.manifest_version.lock().clone();
 
         // Verify old values and explicit entry times against this attempt's state.
-        let verified = match verify_batch(handle, &batch) {
+        let verified = match verify_batch(handle, &batch, &manifest) {
             Ok(verified) => verified,
             Err(e) => return finish_all_errors(batch, e),
         };
+        drop(sync_guard);
 
         let valid_indices: Vec<usize> = verified
             .iter()
@@ -885,7 +911,7 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
         let (entries, new_packs) = build(first_seq);
         let last_seq = first_seq + valid_indices.len().saturating_sub(1) as u64;
 
-        let updated = updated_manifest(
+        let mut updated = updated_manifest(
             manifest.as_ref(),
             &slot,
             last_seq,
@@ -893,13 +919,20 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
             &writer,
             &new_packs,
         );
+        for (offset, request) in valid_indices.iter().filter_map(|&index| batch.get(index)).enumerate() {
+            if let Some(receipt) = &request.initialization {
+                let mut receipt = receipt.clone();
+                receipt.seq = first_seq + offset as u64;
+                updated.initialization = Some(receipt);
+            }
+        }
         let committed = commit_manifest(handle, updated, known_version, &slot, &span).await;
 
         match committed {
             CommitOutcome::Committed(committed, version) => {
                 mark_pending(handle).instrument(span.clone()).await;
                 let committed = CommittedBatch {
-                    manifest: committed,
+                    manifest: *committed,
                     entries,
                     new_packs,
                     last_seq,
@@ -1355,4 +1388,70 @@ pub(crate) async fn add_pack_impl(
         .find(|p| p.checksum == checksum)
         .ok_or_else(|| WalError::Corrupt(format!("pack {hex} not visible after install")))?;
     publish_compact_impl(handle, info, Vec::new(), tier).await
+}
+
+#[cfg(test)]
+mod initialization_tests {
+    use super::*;
+
+    fn request(branch: &str, initialize: bool) -> PublishRequest {
+        let (response, _) = oneshot::channel();
+        PublishRequest {
+            pack: None,
+            txn: RefTransaction {
+                updates: vec![gitcask_proto::v1::RefUpdate {
+                    name: format!("refs/heads/{branch}"),
+                    new_oid: "a".repeat(40),
+                    ..Default::default()
+                }],
+                atomic: true,
+                ..Default::default()
+            },
+            meta: HashMap::new(),
+            synced: true,
+            created_at: None,
+            initialization: initialize.then(gitcask_proto::v1::Initialization::default),
+            response,
+        }
+    }
+
+    #[tokio::test]
+    async fn pristine_guard_follows_every_accepted_request_in_a_batch() -> anyhow::Result<()> {
+        let cache = tempfile::tempdir()?;
+        let mut config = gitcask_config::Config::default();
+        config.cache.dir = cache.path().to_path_buf();
+        let registry = crate::Registry::new(
+            gitcask_store::memory::MemoryStore::shared(),
+            Arc::new(config),
+        );
+        let handle = registry
+            .create(
+                &gitcask_git::RepoId::new("test", "batch")?,
+                gitcask_git::ObjectFormat::Sha1,
+            )
+            .await?;
+        let manifest = handle.manifest();
+        // Different branches: per-ref old-OID checks alone would accept both.
+        for (batch, expected) in [
+            (
+                vec![request("writer", false), request("init", true)],
+                vec![true, false],
+            ),
+            (
+                vec![request("init", true), request("writer", false)],
+                vec![true, true],
+            ),
+            (
+                vec![request("init1", true), request("init2", true)],
+                vec![true, false],
+            ),
+        ] {
+            let actual: Vec<bool> = verify_batch(&handle, &batch, &manifest)?
+                .into_iter()
+                .map(|v| v.valid)
+                .collect();
+            assert_eq!(actual, expected);
+        }
+        Ok(())
+    }
 }

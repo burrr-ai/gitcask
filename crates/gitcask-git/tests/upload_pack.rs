@@ -50,7 +50,7 @@ fn oid(s: &str) -> gix_hash::ObjectId {
 /// Build a v2 fetch command pkt-line body from a typed request. Uses the public
 /// builder to ensure all fields are serialized.
 fn build_fetch_body(req: &UploadPackRequest) -> Vec<u8> {
-    gitcask_git::build_v2_fetch_request(req)
+    gitcask_git::build_v2_fetch_request(req, ObjectFormat::Sha1)
 }
 /// Create a pack with no deltas (pack.window=0) to avoid gix Verify-mode
 /// ODB lookup issues during first pack ingestion.

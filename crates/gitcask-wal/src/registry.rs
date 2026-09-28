@@ -226,6 +226,7 @@ impl Registry {
             updated_at: Some(gitcask_proto::time::now()),
             writer: crate::handle::instance_id(),
             revision: 1,
+            initialization: None,
         };
 
         let buf = manifest.encode_to_vec();

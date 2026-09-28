@@ -80,7 +80,7 @@ test:
     {{t5}} cargo test --workspace --lib --bins
     {{t5}} cargo test -p gitcask-store --features testing --tests
     {{t5}} cargo test -p gitcask-git -p gitcask-wal --tests
-    {{t5}} cargo test -p gitcask-server --test web_api --test api_v1 --test static_http --test maintain --test routing_prefix --test drain --test retryable_store
+    {{t5}} cargo test -p gitcask-server --test web_api --test initialize --test api_v1 --test static_http --test maintain --test routing_prefix --test drain --test retryable_store
 
 # Smart-HTTP end-to-end against real git (≈ 20 s) — run when touching smart.rs/receive/upload-pack/wal.
 e2e *ARGS:

@@ -1675,6 +1675,80 @@ async fn healthy_request_round_trip_budgets() -> Result<()> {
     Ok(())
 }
 
+/// The initializer starts with an empty manifest, pauses at CAS, and a normal
+/// writer commits another branch. The retry must reject the whole initialization.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initialization_rechecks_pristine_after_another_branch_wins_cas() -> Result<()> {
+    let cluster = Cluster::new(8801, 2).await?;
+    let handle = cluster.instances[0].open(&cluster.id).await?;
+    let work = WorkRepo::new();
+    let oid = work.commit(1, "initialize");
+    let bytes = work.pack(&oid, None);
+    let pack = handle
+        .local()
+        .ingest_pack(
+            std::io::Cursor::new(bytes),
+            gitcask_git::IngestOptions {
+                fsck: true,
+                max_bytes: None,
+                thin: false,
+            },
+        )
+        .await?
+        .context("initialization pack")?;
+    drop(handle.sync_refs().await?);
+    cluster.instances[0].link.set(FaultPlan {
+        delay: Some((Duration::from_secs(1), Duration::from_secs(1))),
+        only_keys: Some(vec!["manifest.pb".into()]),
+        ..Default::default()
+    });
+    let receipt = gitcask_proto::v1::Initialization {
+        operation_key: "initialize".into(),
+        request_hash: "b".repeat(64),
+        ref_name: "refs/heads/initial".into(),
+        commit_oid: oid,
+        tree_oid: String::new(),
+        seq: 0,
+    };
+    let initialize = tokio::spawn(async move {
+        handle
+            .publish_initialization(pack, receipt, std::collections::HashMap::new())
+            .await
+    });
+    // Wait for the initializer's log slot, which precedes the delayed CAS.
+    let log_key = format!("{}log/0000000000000001.pb", cluster.repo_prefix());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if cluster.truth.head(&log_key).await.unwrap().is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let mut writer = Pusher::new(0);
+    ensure!(
+        writer
+            .push_once(&cluster.instances[1], &cluster.id, Duration::from_secs(10))
+            .await?
+    );
+    let result = initialize.await??;
+    ensure!(result.per_ref.iter().all(|(_, result)| result.is_err()));
+    let truth = cluster.truth_manifest().await?;
+    ensure!(truth.initialization.is_none());
+    let observer = cluster.observer();
+    let handle = observer.open(&cluster.id).await?;
+    ensure!(
+        handle
+            .local()
+            .ref_view()?
+            .get("refs/heads/initial")
+            .is_none()
+    );
+    ensure!(handle.local().ref_view()?.get("refs/heads/p0").is_some());
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Checkpoint writer crashes between its PUTs and the manifest CAS
 // ---------------------------------------------------------------------------

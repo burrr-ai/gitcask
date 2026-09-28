@@ -32,6 +32,7 @@ decisions numbered in §4 here); this file keeps the rules.
 | `docs/ROUNDTRIPS.md` | **Anyone touching a protocol that talks to the bucket** (publish, sync, checkpoints, compaction/leases, store backends). Round trips are the cost model; correct is not sufficient. |
 | `docs/LFS.md` | Anyone touching LFS (`lfs.rs`) or importing a repository whose LFS history lives elsewhere. |
 | `docs/INTEGRITY.md` | Anyone touching import, the maintainer's `fsck` unit, or seeing `connectivity: missing object` on a push. |
+| `docs/INITIALIZE.md` | Pristine repository initialization: pinned trees, independent objects, authorization, retries and LFS/submodule boundaries. |
 | `docs/EVENTS.md` | Anyone changing WAL-derived ref events, the webhook bridge, consumer semantics or event cursors. |
 | `docs/OPERATIONS.md` | Operators and on-call responders. Metrics, symptom-first diagnosis, capacity, incidents, recovery and routine checks. |
 | `docs/CONTRACT.md` | When you touch a crate boundary. The cross-crate contract; *extend, don't rename*; code wins where they differ. |
@@ -350,6 +351,18 @@ decision in §4 — or the PR is; never "fix later".
   `/{owner}/{repo}` remains available with `docs` or `openapi.json` as an owner.
 
 Decision identifiers are stable; gaps in the numbering are intentional.
+
+- **D51** **Pristine repositories can be initialized from a pinned Gitcask tree** (2026-09-28).
+  `POST /{o}/{r}/api/initialize` creates one parentless commit from a full source commit OID,
+  with caller-supplied identity, time and message, and independently uploads its complete tree
+  closure into the destination's normal packs. The existing WAL publisher checks pristine
+  manifest state across the batch and every CAS retry; its same manifest CAS records one bounded
+  initialization receipt. Exact authorized retries return that original result without changing
+  later writes or opening the source. Source read and destination write use the same resolved
+  principal. No source history, durable alternates, shared snapshot, external fetch, checkout or
+  second commit point is introduced. Same-format SHA-1 and SHA-256 are supported; mismatches and
+  LFS pointer trees are rejected. Gitlinks remain external references. The complete contract and
+  all-writers upgrade requirement are in [docs/INITIALIZE.md](docs/INITIALIZE.md).
 
 ---
 

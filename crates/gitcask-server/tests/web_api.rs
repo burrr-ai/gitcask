@@ -98,6 +98,7 @@ async fn openapi_and_scalar_docs_are_public_and_offline() -> TestResult {
         "/{owner}/{repo}/api/blob/{rest}",
         "/{owner}/{repo}/api/commit/{sha}",
         "/{owner}/{repo}/api/commits",
+        "/{owner}/{repo}/api/initialize",
         "/{owner}/{repo}/api/merges",
         "/{owner}/{repo}/api/compare/{base}...{head}",
         "/{owner}/{repo}/api/ops",

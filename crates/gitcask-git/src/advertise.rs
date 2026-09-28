@@ -260,12 +260,16 @@ fn capabilities_for(service: Service, format: ObjectFormat) -> String {
     }
 }
 /// Build the v2 fetch command pkt-line request bytes from a typed request.
-pub fn build_v2_fetch_request(req: &UploadPackRequest) -> Vec<u8> {
+pub fn build_v2_fetch_request(req: &UploadPackRequest, format: ObjectFormat) -> Vec<u8> {
     let mut buf = Vec::new();
     pkt::encode_data(&mut buf, b"command=fetch\n");
-    // Git protocol v2 carries all fetch features (thin-pack, want, have, ...)
-    // as arguments following the delim-pkt; there is no pre-delim capability
-    // section for fetch.
+    // Object format is a protocol capability before the delimiter. Fetch
+    // arguments follow it; omitting this capability makes upstream Git assume
+    // SHA-1 even when the client negotiated SHA-256 with our advertisement.
+    pkt::encode_data(
+        &mut buf,
+        format!("object-format={}\n", format.as_str()).as_bytes(),
+    );
     pkt::encode_delim(&mut buf);
     if req.thin_pack {
         pkt::encode_data(&mut buf, b"thin-pack\n");

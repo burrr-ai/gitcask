@@ -8,6 +8,7 @@ It is intended for platforms that create and delete repositories programmaticall
 
 - **git over HTTP** — clone, fetch, push and LFS work with standard git clients.
 - **JSON API** — read trees, commits and diffs; commit files, create branches and merge, all without a clone or working directory.
+- **Independent initialization** — [copy a pinned Gitcask tree into a pristine repository](docs/INITIALIZE.md) as one root commit, with independent objects and safe retries.
 - **Webhooks** — each ref change is delivered once, from a durable cursor, and can be replayed.
 - **Stateless servers** — every instance can serve every repository. A new instance starts serving refs within a few seconds.
 - **Built-in authentication** — gitcask verifies platform JWTs with a public key or introspects opaque tokens with their issuer, then applies repository scopes. No user database is involved.

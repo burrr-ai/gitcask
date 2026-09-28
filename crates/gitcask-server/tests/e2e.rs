@@ -747,6 +747,53 @@ fn mint_jwt(private_key: &str, permission: &str, ttl_seconds: u64) -> anyhow::Re
     )
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sha256_push_then_v2_cold_clone_negotiates_object_format() -> TestResult {
+    let server = Server::start().await?;
+    let response = reqwest::Client::new()
+        .put(format!(
+            "{}/format/sha256?object_format=sha256",
+            server.base_url
+        ))
+        .send()
+        .await?;
+    assert_eq!(response.status(), 201);
+    let source = tempfile::tempdir()?;
+    git_in(
+        source.path(),
+        &["init", "-q", "-b", "main", "--object-format=sha256"],
+    )?;
+    std::fs::write(source.path().join("hello"), "sha256 clone\n")?;
+    git_in(source.path(), &["add", "."])?;
+    git_in(source.path(), &["commit", "-qm", "initial"])?;
+    git_in(
+        source.path(),
+        &["push", "-q", &server.repo_url("format", "sha256"), "main"],
+    )?;
+    let cold = server.start_sibling_with(|_| {}).await?;
+    let destination = tempfile::tempdir()?;
+    git_in(
+        destination.path(),
+        &[
+            "-c",
+            "protocol.version=2",
+            "clone",
+            "-q",
+            &cold.repo_url("format", "sha256"),
+            ".",
+        ],
+    )?;
+    assert_eq!(
+        git_in(source.path(), &["rev-parse", "HEAD"])?,
+        git_in(destination.path(), &["rev-parse", "HEAD"])?
+    );
+    assert_eq!(
+        std::fs::read_to_string(destination.path().join("hello"))?,
+        "sha256 clone\n"
+    );
+    Ok(())
+}
+
 fn jwt_repo_url(server: &str, token: &str) -> anyhow::Result<String> {
     let mut url = reqwest::Url::parse(&format!("{server}/jwt/r.git"))?;
     url.set_username("ignored")

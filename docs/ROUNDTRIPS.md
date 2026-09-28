@@ -46,6 +46,7 @@ right shape. This document is the thinking tool; apply it to every protocol chan
 | Receive-pack tip validation (including empty packs) | Local lookups / connectivity walk after the existing Full sync, before publish; missing tips are refused before log PUT or manifest CAS | 0 extra; warm push remains 6 requests with a pack, 4 for ref-only | `smart.rs::receive_pack_process` |
 | Ref write API | 1 freshness GET → optional tag pack PUT ∥ idx PUT ∥ log PUT → manifest CAS → best-effort pending-marker PUT | ref-only: 4; annotated tag: 6 | `web/api/write.rs`, existing `publish.rs` |
 | Commit / merge write API | 1 freshness GET → new-object pack PUT ∥ idx PUT ∥ log PUT → manifest CAS → best-effort pending-marker PUT; a fast-forward publishes no pack; already-merged returns after freshness | commit / merge commit: 6; fast-forward: 4; already merged: 1; cold packs use the existing Full sync budget | `web/api/commit.rs`, existing `publish.rs` |
+| Initialize API (warm source and destination) | destination freshness GET → source freshness GET → pack PUT ∥ idx PUT ∥ log PUT → manifest CAS → pending-marker PUT; exact replay stops after destination freshness | first initialization: 7 requests / 5 rounds; exact replay: 1 / 1. Cold source adds existing Full sync work; no LIST or per-blob store reads. Receipt and pristine guard add 0 publisher requests | `web/api/initialize.rs`, existing `publish.rs`; `tests/initialize.rs::publication_failures_ambiguous_success_and_request_budgets` |
 | Archive API, no `prefix` (warm packs) | 1 freshness GET → archive GET (plain/304) or HEAD → Range GET; shared-cache miss adds a free 404 probe → archive PUT → serving read | hit plain/304: 2; hit range: 3; miss plain: 4; miss range: 5; cold packs use the existing Full sync budget | `web/api/archive.rs`, `static_object.rs`, `sync.rs` |
 | Archive API, with `prefix` (warm packs) | 1 freshness GET; `git archive` writes an unlinked local temporary file and the response streams from it; no archive-cache GET/PUT | 1; cold packs use the existing Full sync budget | `web/api/archive.rs`, `static_object.rs`, `sync.rs` |
 | Compaction publish | pack/side-file uploads → log PUT → manifest CAS; no pending marker | unchanged | `publish.rs::publish_compact_impl` |
@@ -69,6 +70,16 @@ only after Create/CAS failure, so those failure helpers do not change their rows
 Pending markers intentionally change a healthy push from 3 to 4 store-request rounds (5 to 6 requests):
 the marker must follow the manifest CAS so an uncommitted push cannot wake maintenance. Its failure is logged
 and counted but never changes the already-committed push result.
+
+Initialization adds one source freshness GET to the existing six-request write API
+budget. The source is opened only after the destination receipt check, so a replay
+does not touch the source. A conflict may add a destination freshness GET to identify
+an identical winning initializer; this verification stays on the failure path.
+The publisher captures manifest, CAS version and ref verification under the existing
+sync mutex, and advances the pristine predicate with the accepted batch: no extra
+bucket request or new CAS object. Existing push/read/checkpoint budgets are unchanged.
+Forwarding the negotiated SHA-256 object-format capability to upstream v2 upload-pack
+is entirely local and also adds zero bucket requests.
 
 Maintainer parallelism does not add a round trip or change any CAS'd object's write rate. It raises the
 instance's maintenance request rate to approximately `maintenance.workers / per-repository latency` while
