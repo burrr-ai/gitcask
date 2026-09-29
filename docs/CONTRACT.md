@@ -59,6 +59,7 @@ impl LocalRepo {
   pub struct SpooledPack { /* private */ }  // .bytes()
   /// = git index-pack: write objects/pack/pack-<checksum>.{pack,idx,rev}; thin packs resolved against
   /// the odb (--fix-thin); verify checksum; opts.fsck => object-level validation. Empty pack => Ok(None).
+  /// opts.max_bytes is ignored: spool_pack enforced it (receive-pack passes None).
   pub async fn ingest_spooled(&self, pack: SpooledPack, opts: IngestOptions)
       -> Result<Option<IngestedPack>, GitError>;
   /// spool_pack(pack, opts.max_bytes) then ingest_spooled, for local streams (import, API writes).

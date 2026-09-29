@@ -106,8 +106,8 @@ impl LocalRepo {
     /// repo's ODB. Empty input returns Ok(None). `opts.fsck` adds
     /// `--fsck-objects` so object parse happens in the same pass as
     /// indexing (a large repository: 64 k objects used to spend tens of seconds in a
-    /// second gix walk after a gix write). `opts.max_bytes` was already
-    /// enforced by reception.
+    /// second gix walk after a gix write). `opts.max_bytes` is not used here:
+    /// reception ([`LocalRepo::spool_pack`]) enforces it.
     pub async fn ingest_spooled(
         &self,
         pack: SpooledPack,

@@ -791,7 +791,7 @@ async fn reception_refusal(
 ) -> Vec<u8> {
     let msg = format!("unpack failed: {e}");
     tracing::warn!(error = %msg, "receive-pack: pack reception failed");
-    metrics::counter!("gitcask_push_refused_total", "reason" => "unpack").increment(1);
+    metrics::counter!("gitcask_push_refused_total", "reason" => "body").increment(1);
     refusal_report(caps, txn, &msg).await
 }
 
@@ -910,7 +910,8 @@ async fn receive_pack_process(
     let route_id = handle.id().clone();
     let opts = gitcask_git::IngestOptions {
         fsck: st.cfg.wal.fsck_objects,
-        max_bytes: Some(st.cfg.server.max_push_bytes.as_u64()),
+        // Reception enforced `server.max_push_bytes`.
+        max_bytes: None,
         thin: true,
     };
     let local = handle.local().clone();

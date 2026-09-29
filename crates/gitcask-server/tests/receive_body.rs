@@ -174,9 +174,11 @@ fn stray_pack_files(dir: &Path) -> Vec<String> {
 }
 
 /// POST `body` to receive-pack as HTTP/1.1 chunked, `pieces` chunks paced by
-/// `gap`, the terminating chunk after one more `gap`. Returns the raw response,
-/// the instant the terminator was written, and the instant the first response
-/// byte arrived.
+/// `gap`, the terminating chunk after one more `gap`. With `hold_until_ready`,
+/// the terminator is withheld until that repository's local copy is ready
+/// (bounded, 30 s): readiness without EOF proves the sync overlapped the upload.
+/// Returns the raw response, the instant just before the terminator was
+/// written, and the instant the first response byte arrived.
 async fn paced_post(
     server: &Server,
     path: &str,
@@ -184,6 +186,7 @@ async fn paced_post(
     gzip_encoded: bool,
     pieces: usize,
     gap: Duration,
+    hold_until_ready: Option<&gitcask_wal::RepoHandle>,
 ) -> Result<(Vec<u8>, Instant, Instant)> {
     let addr = server.base_url.trim_start_matches("http://").to_string();
     let stream = tokio::net::TcpStream::connect(&addr).await?;
@@ -226,6 +229,17 @@ async fn paced_post(
         wr.flush().await?;
         tokio::time::sleep(gap).await;
     }
+    if let Some(handle) = hold_until_ready {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !handle.packs_ready() {
+            ensure!(
+                Instant::now() < deadline,
+                "the local copy never became ready while the request body was still open; \
+                 the sync did not overlap the upload"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
     let body_end = Instant::now();
     wr.write_all(b"0\r\n\r\n").await?;
     wr.flush().await?;
@@ -254,6 +268,7 @@ async fn slow_sideband_push(gzip_encoded: bool) -> Result<()> {
         gzip_encoded,
         8,
         Duration::from_millis(150),
+        None,
     )
     .await?;
     // Status line, headers and the band-2 banner all wait for the terminator.
@@ -426,20 +441,14 @@ async fn cold_instance_push(sideband: bool) -> Result<()> {
     let cold = warm
         .start_sibling_with(|c| c.wal.prefetch_packs = false)
         .await?;
-    // The sync overlaps the upload: this instance's copy is ready before the
-    // request body ends.
+    // The sync overlaps the upload: this instance's copy becomes ready while
+    // the request body is still open (the terminator is withheld until then).
     let handle = cold
         .state
         .registry
         .open(&gitcask_git::RepoId::new("t", "cold")?)
         .await?;
     ensure!(!handle.packs_ready(), "the sibling already has the packs");
-    let ready = tokio::spawn(async move {
-        while !handle.packs_ready() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        Instant::now()
-    });
     let (raw, body_end, first_byte) = paced_post(
         &cold,
         "/t/cold.git/git-receive-pack",
@@ -447,18 +456,13 @@ async fn cold_instance_push(sideband: bool) -> Result<()> {
         false,
         8,
         Duration::from_millis(150),
+        Some(&handle),
     )
     .await?;
     ensure!(
         first_byte >= body_end,
         "response started {:?} before the request body ended",
         body_end - first_byte
-    );
-    let ready_at = tokio::time::timeout(Duration::from_secs(10), ready).await??;
-    ensure!(
-        ready_at < body_end,
-        "the sync finished {:?} after the request body ended; it did not overlap the upload",
-        ready_at - body_end
     );
     let (head, body) = parse_response(&raw)?;
     ensure!(head.starts_with("HTTP/1.1 200"), "{head}");
@@ -561,6 +565,7 @@ async fn abandoned_upload_during_sync_releases_the_repository() -> Result<()> {
         false,
         2,
         Duration::from_millis(50),
+        None,
     )
     .await?;
     ensure!(first_byte >= body_end);

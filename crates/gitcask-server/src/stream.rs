@@ -64,9 +64,10 @@ pub fn write_body_pipe(buf: usize) -> (tokio::io::DuplexStream, Body) {
 /// response through it (banner, sync narration, report), so when the response
 /// may start is decided only by when [`forward`] starts: at once, or after the
 /// request body has ended, replaying what was said meanwhile. Until then the
-/// channel holds narration only, which is rate-limited at the source (progress
-/// at most once a second, a heartbeat every 5 s), so it stays small for any
-/// upload inside `server.request_timeout`.
+/// channel holds narration only, and narration is produced only while the sync
+/// runs (progress bars at most once a second, one notice per sync event, a
+/// heartbeat after 5 s of silence); once the sync is done nothing more is added
+/// however long the upload takes. The worst case, a one-hour sync, is about 1 MB.
 pub fn narration_channel() -> (ChannelWriter, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     (ChannelWriter(tx), rx)
