@@ -66,8 +66,9 @@ not a substitute for a repository listing.
 
 There is no dedicated store-latency Prometheus metric. Do not build dashboards on series that do not exist —
 derive p50/p95/p99 from the JSON logs: `span.name = store.get|store.head|store.put|store.delete` with
-`elapsed_ms` and `outcome`. Push breaks down into `receive.body` (with `git.spool_pack`: request-body
-reception, `bytes` and `outcome`), `receive.ingest`, `git.ingest_pack`, `receive.connectivity`,
+`elapsed_ms` and `outcome`. Push breaks down into `receive.body` (request-body reception, overlapping the
+sync; fields `http_version` and `response_start` = `live` | `after_eof`, with `git.spool_pack`: `bytes`
+and `outcome`), `receive.ingest`, `git.ingest_pack`, `receive.connectivity`,
 `receive.publish` and `wal.publish` spans. For clone/fetch, total streaming time is
 judged by the git client's own timing plus the band-2 progress lines; cold sync splits into `wal.sync`,
 `wal.materialize`, `wal.reconcile_packs`, `wal.download_pack`, and pack computation into `git.upload_pack`.
@@ -95,10 +96,15 @@ meaning are defined in [INTEGRITY](INTEGRITY.md) only.
    `local copy is missing packs` / `local copy ready (...s)` to split before/after sync.
 2. Look at `gitcask_store_retries_total`, store error outcomes and `store.* elapsed_ms`. If every repository
    is slow at once, suspect S3 or the network first.
-3. Long `wal.materialize`/`wal.download_pack` with only the first request slow = cold cache. A push
-   answers nothing — no HTTP status, no band-2 line — until its request body has ended (D52): a long
-   `git.spool_pack` is the upload itself, and `outcome = error|cancelled` with `bytes` below the client's
-   pack size means the body stopped arriving (client or proxy), before any gitcask work. Long
+3. Long `wal.materialize`/`wal.download_pack` with only the first request slow = cold cache. Which way a
+   push answered is on its `receive.body` span (D52): `response_start = after_eof` (HTTP/1.x, or no
+   side-band) means no HTTP status or band-2 line left before the request body ended — the client shows
+   only its own upload progress, and the sync narration said meanwhile is replayed right after the
+   banner; `live` (side-band over HTTP/2) narrates from the start. A long `git.spool_pack` is the upload
+   itself, and `outcome = error|cancelled` with `bytes` below the client's pack size means the body
+   stopped arriving (client or proxy), before any gitcask work. A `live` push that stalls there behind a
+   proxy speaking HTTP/2 to gitcask and HTTP/1.x to the client is that proxy dropping the body after an
+   early response: front gitcask with HTTP/1.1 instead. Long
    `git.ingest_pack` inside `receive.ingest` = pack indexing/fsck; long `receive.connectivity` = the object
    graph walk; long `wal.publish` = the PUT/CAS phase.
 4. Check `gitcask_lock_wait_seconds`, `gitcask_runtime_stall_total`, `gitcask_http_inflight`. On an

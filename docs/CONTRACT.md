@@ -52,7 +52,8 @@ impl LocalRepo {
 
   // ---- packs
   /// Read `pack` to EOF into an unlinked file under objects/pack/ (freed on drop), bounded by `max_bytes`.
-  /// No ingest lock. receive-pack finishes this before its response starts (D52).
+  /// No ingest lock. receive-pack runs it alongside the sync; over HTTP/1.x it finishes before the
+  /// response starts (D52).
   pub async fn spool_pack<R: tokio::io::AsyncRead + Unpin + Send>(&self, pack: R, max_bytes: Option<u64>)
       -> Result<SpooledPack, GitError>;
   pub struct SpooledPack { /* private */ }  // .bytes()

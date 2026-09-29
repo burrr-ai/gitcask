@@ -16,8 +16,9 @@ impl LocalRepo {
 
     /// Receive a packfile to EOF into an anonymous temporary file under
     /// `objects/pack/`, bounded by `max_bytes`. This is the only step that
-    /// reads the caller's stream: receive-pack finishes it (request body at
-    /// EOF) before its HTTP response starts, then indexes the result with
+    /// reads the caller's stream: receive-pack runs it alongside the sync and,
+    /// over HTTP/1.x, finishes it (request body at EOF) before its HTTP
+    /// response starts (D52), then indexes the result with
     /// [`LocalRepo::ingest_spooled`]. The file is unlinked as it is created
     /// (`O_TMPFILE` on Linux), so refusal, error, a cancelled request or a
     /// crash leaves nothing on disk, and reception does not hold the ingest
