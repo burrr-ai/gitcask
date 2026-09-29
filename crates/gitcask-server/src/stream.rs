@@ -22,7 +22,9 @@ pub fn body_to_async_read(body: Body) -> impl AsyncRead + Unpin + Send {
 
 /// Wrap an `AsyncRead` in gzip decompression when `content_encoding` is `gzip`.
 /// Returns the original reader otherwise. The gzip decoder requires `AsyncBufRead`,
-/// so the reader is wrapped in a `BufReader`.
+/// so the reader is wrapped in a `BufReader`. The decoder accepts concatenated
+/// members, so it reads the body to its end: its EOF is the request body's EOF
+/// (receive-pack starts its response only after that).
 pub fn maybe_gunzip<R: AsyncRead + Unpin + Send + 'static>(
     content_encoding: Option<&str>,
     reader: R,
@@ -31,9 +33,13 @@ pub fn maybe_gunzip<R: AsyncRead + Unpin + Send + 'static>(
         .map(|s| s.trim().to_ascii_lowercase())
         .as_deref()
     {
-        Some("gzip") => Box::new(async_compression::tokio::bufread::GzipDecoder::new(
-            tokio::io::BufReader::new(reader),
-        )),
+        Some("gzip") => {
+            let mut decoder = async_compression::tokio::bufread::GzipDecoder::new(
+                tokio::io::BufReader::new(reader),
+            );
+            decoder.multiple_members(true);
+            Box::new(decoder)
+        }
         _ => Box::new(reader),
     }
 }

@@ -117,9 +117,10 @@ Schema `crates/gitcask-proto/proto/gitcask/v1/wal.proto`; the S3 backend and tes
 contract suite (`crates/gitcask-store/tests/contract.rs`, incl. compose).
 
 ### 2.2 Write path
-receive-pack (ours, `gitcask-git/src/receive.rs`) → index the pack locally (`git index-pack --stdin --fix-thin
---keep --rev-index --threads=0`, `--fsck-objects` when `wal.fsck_objects`) in a per-ingest scratch git dir (a
-rejected push leaves nothing behind) → connectivity per config (`spawn_blocking`) →
+receive-pack (ours, `gitcask-git/src/receive.rs`) → receive the pack body to request EOF into an unlinked spool
+file (`LocalRepo::spool_pack`, bounded by `server.max_push_bytes`; no response byte before EOF, D52) → sync →
+index the pack locally (`git index-pack --stdin --fix-thin --keep --rev-index --threads=0`, `--fsck-objects`
+when `wal.fsck_objects`) in a per-ingest scratch git dir (a rejected push leaves nothing behind) → connectivity per config (`spawn_blocking`) →
 `pack PUT ∥ idx PUT ∥ log PUT` → **manifest CAS** (group commit per repo per instance,
 `wal.batch_window`) → commit local ref txn → `ok` to the client → best-effort `pending/<o>/<r>` marker PUT (a
 failed marker never fails the push). On 412: refetch, re-validate every old value
@@ -363,6 +364,18 @@ Decision identifiers are stable; gaps in the numbering are intentional.
   second commit point is introduced. Same-format SHA-1 and SHA-256 are supported; mismatches and
   LFS pointer trees are rejected. Gitlinks remain external references. The complete contract and
   all-writers upgrade requirement are in [docs/INITIALIZE.md](docs/INITIALIZE.md).
+
+- **D52** **receive-pack answers only after the request body ends** (2026-09-29).
+  The pack is received to request-body EOF into an anonymous (already unlinked) file under the
+  repository's `objects/pack/`, bounded by `server.max_push_bytes`, before the HTTP status,
+  headers or any band-2 line is sent; gzip bodies are decoded to the end of the body. Sync,
+  index-pack, connectivity and publish follow and stay narrated on band 2. A proxy that forwards
+  the request body over HTTP/1 may stop forwarding it once the upstream answers: behind an AWS ALB
+  a side-band-64k push whose banner went out after the ref commands stalled forever in the body
+  read, while the same pack without side-band took 0.8 s. Reception holds no ingest lock (a slow
+  upload never queues another push), and `git.spool_pack` records received `bytes` and its
+  `outcome` (`eof`, `too_large`, `error`, `cancelled`) on every exit. A refusal before EOF
+  (oversize, unreadable body) is a complete response. No bucket requests change.
 
 ---
 

@@ -51,9 +51,17 @@ impl LocalRepo {
   pub fn refresh(&self) -> Result<(), GitError>;  // re-read odb/refs after pack/ref changes
 
   // ---- packs
-  /// = git index-pack: stream in, write objects/pack/pack-<checksum>.{pack,idx}; thin packs resolved against
-  /// the odb (--fix-thin); verify checksum; opts.fsck => object-level validation. Empty input => Ok(None).
-  pub async fn ingest_pack<R: tokio::io::AsyncRead + Unpin + Send + 'static>(&self, pack: R, opts: IngestOptions)
+  /// Read `pack` to EOF into an unlinked file under objects/pack/ (freed on drop), bounded by `max_bytes`.
+  /// No ingest lock. receive-pack finishes this before its response starts (D52).
+  pub async fn spool_pack<R: tokio::io::AsyncRead + Unpin + Send>(&self, pack: R, max_bytes: Option<u64>)
+      -> Result<SpooledPack, GitError>;
+  pub struct SpooledPack { /* private */ }  // .bytes()
+  /// = git index-pack: write objects/pack/pack-<checksum>.{pack,idx,rev}; thin packs resolved against
+  /// the odb (--fix-thin); verify checksum; opts.fsck => object-level validation. Empty pack => Ok(None).
+  pub async fn ingest_spooled(&self, pack: SpooledPack, opts: IngestOptions)
+      -> Result<Option<IngestedPack>, GitError>;
+  /// spool_pack(pack, opts.max_bytes) then ingest_spooled, for local streams (import, API writes).
+  pub async fn ingest_pack<R: tokio::io::AsyncRead + Unpin + Send>(&self, pack: R, opts: IngestOptions)
       -> Result<Option<IngestedPack>, GitError>;
   pub struct IngestOptions { pub fsck: bool, pub max_bytes: Option<u64>, pub thin: bool }
   pub struct IngestedPack { pub checksum: gix_hash::ObjectId, pub pack_path: PathBuf, pub idx_path: PathBuf,

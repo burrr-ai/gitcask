@@ -629,7 +629,6 @@ pub async fn receive_pack(
     // follow in `pack_reader`. Knowing the capabilities before the sync lets
     // us narrate the sync on band 2 when the client speaks side-band-64k.
     let (txn, caps, pack_reader) = gitcask_git::receive::parse(reader).await?;
-    let pack_reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = Box::new(pack_reader);
     // Wal's verify_txn treats empty string as the zero oid (create/delete).
     // receive::parse emits the 40-zero hex; normalize to empty for both ends.
     let mut txn = txn;
@@ -649,18 +648,31 @@ pub async fn receive_pack(
         .filter(|v| !v.is_empty())
         .map(|v| v.to_string());
 
+    // Receive the whole pack before any response byte: the response starts
+    // only once the request body is at EOF. A proxy that forwards the request
+    // body over HTTP/1 may stop forwarding it once the upstream answers (an
+    // AWS ALB did: a side-band push stalled forever in the body read while a
+    // no-sideband push of the same pack took 0.8 s).
+    let spooled = match handle
+        .local()
+        .spool_pack(pack_reader, Some(st.cfg.server.max_push_bytes.as_u64()))
+        .instrument(tracing::info_span!("receive.body"))
+        .await
+    {
+        Ok(spooled) => spooled,
+        Err(e) => {
+            let msg = format!("unpack failed: {e}");
+            tracing::warn!(repo = %route.id, error = %msg, "receive-pack: pack reception failed");
+            metrics::counter!("gitcask_push_refused_total", "reason" => "unpack").increment(1);
+            return Ok(receive_response(refusal_report(&caps, &txn, &msg).await));
+        }
+    };
+
     if !caps.side_band_64k {
         // No sideband: the response is the report alone, after the work.
         let guard = handle.sync_full().await?;
         let report = receive_pack_process(
-            st,
-            &handle,
-            guard,
-            txn,
-            caps,
-            pack_reader,
-            &principal,
-            request_id,
+            st, &handle, guard, txn, caps, spooled, &principal, request_id,
         )
         .await?;
         return Ok(receive_response(report));
@@ -668,7 +680,8 @@ pub async fn receive_pack(
 
     // Streaming: the report comes at the end; everything before it is band-2
     // narration (sync/materialize progress, heartbeat), so the connection is
-    // never silent while this host brings a big repository's side-files in.
+    // never silent while this host brings a big repository's side-files in,
+    // indexes the pack and publishes it.
     let (mut writer, body) = write_body_pipe(64 * 1024);
     let handle = handle.clone();
     let st_arc = st.clone();
@@ -713,7 +726,7 @@ pub async fn receive_pack(
             guard,
             txn,
             caps.clone(),
-            pack_reader,
+            spooled,
             &who,
             request_id,
         )
@@ -740,7 +753,7 @@ pub async fn receive_pack(
     ))
 }
 
-/// Everything after the sync: unpack, connectivity, publish → the
+/// Everything after reception and the sync: unpack, connectivity, publish → the
 /// report-status bytes (already sideband-framed when the client asked).
 async fn receive_pack_process(
     st: &AppState,
@@ -748,20 +761,19 @@ async fn receive_pack_process(
     _guard: gitcask_wal::ReadGuard<'_>,
     mut txn: gitcask_proto::v1::RefTransaction,
     caps: gitcask_git::receive::ReceiveCaps,
-    pack_reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+    pack: gitcask_git::SpooledPack,
     principal: &crate::auth::Principal,
     request_id: Option<String>,
 ) -> Result<Vec<u8>, ApiError> {
     let route_id = handle.id().clone();
-    let max_bytes = Some(st.cfg.server.max_push_bytes.as_u64());
     let opts = gitcask_git::IngestOptions {
         fsck: st.cfg.wal.fsck_objects,
-        max_bytes,
+        max_bytes: Some(st.cfg.server.max_push_bytes.as_u64()),
         thin: true,
     };
     let local = handle.local().clone();
     let ingest = local
-        .ingest_pack(pack_reader, opts)
+        .ingest_spooled(pack, opts)
         .instrument(tracing::info_span!("receive.ingest"))
         .await;
 
