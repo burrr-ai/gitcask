@@ -56,16 +56,16 @@ Data can always be taken out: `git clone --mirror` exports a repository (with `g
 
 ## Running it
 
-Published images are available at `ghcr.io/burrr-ai/gitcask:0.0.5` for `linux/amd64` and
+Published images are available at `ghcr.io/burrr-ai/gitcask:0.0.6` for `linux/amd64` and
 `linux/arm64`. Pin the patch tag or the image digest recorded in the
 [release](https://github.com/burrr-ai/gitcask/releases); there is no floating `latest` tag.
 
 ```sh
-docker pull ghcr.io/burrr-ai/gitcask:0.0.5
+docker pull ghcr.io/burrr-ai/gitcask:0.0.6
 docker run --rm -p 8080:8080 \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
   -v "$PWD/gitcask.toml:/etc/gitcask/gitcask.toml:ro" \
-  ghcr.io/burrr-ai/gitcask:0.0.5
+  ghcr.io/burrr-ai/gitcask:0.0.6
 ```
 
 Provide a production config with your S3 bucket/region/endpoint and JWT or introspection authentication.

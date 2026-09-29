@@ -117,9 +117,12 @@ Schema `crates/gitcask-proto/proto/gitcask/v1/wal.proto`; the S3 backend and tes
 contract suite (`crates/gitcask-store/tests/contract.rs`, incl. compose).
 
 ### 2.2 Write path
-receive-pack (ours, `gitcask-git/src/receive.rs`) → index the pack locally (`git index-pack --stdin --fix-thin
---keep --rev-index --threads=0`, `--fsck-objects` when `wal.fsck_objects`) in a per-ingest scratch git dir (a
-rejected push leaves nothing behind) → connectivity per config (`spawn_blocking`) →
+receive-pack (ours, `gitcask-git/src/receive.rs`) → receive the pack body to request EOF into an unlinked spool
+file (`LocalRepo::spool_pack`, bounded by `server.max_push_bytes`) while the full sync runs; over HTTP/1.x a
+push being received gets no status, header or band-2 byte before request-body EOF (D52; refusals decided before
+or during reception are complete responses and may come earlier) → index the pack locally (`git index-pack --stdin --fix-thin --keep --rev-index
+--threads=0`, `--fsck-objects` when `wal.fsck_objects`) in a per-ingest scratch git dir (a rejected push leaves
+nothing behind) → connectivity per config (`spawn_blocking`) →
 `pack PUT ∥ idx PUT ∥ log PUT` → **manifest CAS** (group commit per repo per instance,
 `wal.batch_window`) → commit local ref txn → `ok` to the client → best-effort `pending/<o>/<r>` marker PUT (a
 failed marker never fails the push). On 412: refetch, re-validate every old value
@@ -363,6 +366,34 @@ Decision identifiers are stable; gaps in the numbering are intentional.
   second commit point is introduced. Same-format SHA-1 and SHA-256 are supported; mismatches and
   LFS pointer trees are rejected. Gitlinks remain external references. The complete contract and
   all-writers upgrade requirement are in [docs/INITIALIZE.md](docs/INITIALIZE.md).
+
+- **D52** **Over HTTP/1.x a push being received is answered only after the request body ends**
+  (2026-09-29). A proxy that forwards the request body over HTTP/1 may stop forwarding it once the
+  upstream answers: behind an AWS ALB (HTTP/2 to the client, HTTP/1 to gitcask) a side-band-64k push
+  whose banner went out after the ref commands stalled forever in the body read, while the same pack
+  without side-band took 0.8 s. The pack is received to request-body EOF into an anonymous (already
+  unlinked) file under the repository's `objects/pack/`, bounded by `server.max_push_bytes`; gzip
+  bodies are decoded to the end of the body. The full sync runs concurrently with the upload. One rule
+  in `receive_pack` decides when the response starts: a side-band push over **HTTP/2** (full-duplex
+  streams) narrates live from the start; over **HTTP/1.x**, and for every push without side-band, a
+  push that is being received gets no status, header or band-2 byte before request-body EOF.
+  Refusals decided before or during reception (auth, URL, drain, parse, oversize, read error) are
+  complete responses and may come earlier, which is safe behind a proxy because nothing is awaited
+  from the body afterwards. The HTTP version is that of the connection reaching gitcask (the last
+  hop): a direct or standalone git client over `http://` and every HTTP/1.1 proxy hop take
+  `after_eof`; `live` is reachable only when a proxy speaks prior-knowledge h2c to gitcask (or
+  terminates HTTP/2 over TLS in front of it and forwards h2c). The side-band task writes its whole
+  response (banner, sync narration, index-pack, connectivity, publish, report) to one non-blocking
+  channel; the rule only chooses when that channel starts being copied to the client, so narration
+  produced during an HTTP/1.x upload is buffered and replayed in order after EOF, and the client
+  shows its own upload progress meanwhile. Deployment caveat: a proxy that speaks HTTP/2 to gitcask
+  but HTTP/1.x to the client must be proven to keep forwarding the request body after an early
+  response; otherwise terminate at a proxy that talks HTTP/1.1 to gitcask. Reception holds no ingest
+  lock, a reception failure cancels the sync (dropping its read guard), counts as
+  `gitcask_push_refused_total{reason="body"}` and is answered as a complete refusal (streamed when
+  already live), and `receive.body` records `http_version` and `response_start` (`live` |
+  `after_eof`) while `git.spool_pack` records received `bytes` and its `outcome` (`eof`, `too_large`,
+  `error`, `cancelled`) on every exit. No bucket requests change.
 
 ---
 

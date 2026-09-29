@@ -15,7 +15,9 @@ use axum::response::{IntoResponse, Response};
 use crate::AppState;
 use crate::error::ApiError;
 use crate::repo::RepoRoute;
-use crate::stream::{VecWriter, body_to_async_read, maybe_gunzip, write_body_pipe};
+use crate::stream::{
+    VecWriter, body_to_async_read, forward, maybe_gunzip, narration_channel, write_body_pipe,
+};
 use gitcask_git::pkt as pktline;
 use tracing::Instrument;
 
@@ -54,11 +56,12 @@ pub(crate) async fn upload_pack_route(
 pub(crate) async fn receive_pack_route(
     State(st): State<Arc<AppState>>,
     route: RepoRoute,
+    version: axum::http::Version,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
     let _permit = st.semaphores.acquire(&route.id.to_string()).await;
-    receive_pack(&st, &route, &headers, body).await
+    receive_pack(&st, &route, version, &headers, body).await
 }
 
 /// `GET /{owner}/{repo}[.git]/info/refs?service=git-upload-pack|git-receive-pack`
@@ -595,6 +598,7 @@ fn push_url_must_be_git(st: &AppState, route: &RepoRoute, headers: &HeaderMap) -
 pub async fn receive_pack(
     st: &Arc<AppState>,
     route: &RepoRoute,
+    version: axum::http::Version,
     headers: &HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
@@ -629,7 +633,6 @@ pub async fn receive_pack(
     // follow in `pack_reader`. Knowing the capabilities before the sync lets
     // us narrate the sync on band 2 when the client speaks side-band-64k.
     let (txn, caps, pack_reader) = gitcask_git::receive::parse(reader).await?;
-    let pack_reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = Box::new(pack_reader);
     // Wal's verify_txn treats empty string as the zero oid (create/delete).
     // receive::parse emits the 40-zero hex; normalize to empty for both ends.
     let mut txn = txn;
@@ -649,18 +652,44 @@ pub async fn receive_pack(
         .filter(|v| !v.is_empty())
         .map(|v| v.to_string());
 
+    // When the response may start (D52) — the one policy. A proxy that
+    // forwards the request body over HTTP/1 may stop forwarding it once the
+    // upstream answers (an AWS ALB did: a side-band push stalled forever in the
+    // body read while a no-sideband push of the same pack took 0.8 s), so over
+    // HTTP/1.x nothing is sent before the request body ends. HTTP/2 streams are
+    // full-duplex: a side-band push narrates from the start. Either way the sync
+    // runs while the pack uploads; only the answer waits.
+    let start = if caps.side_band_64k && version == axum::http::Version::HTTP_2 {
+        ResponseStart::Live
+    } else {
+        ResponseStart::AfterEof
+    };
+    let max_bytes = Some(st.cfg.server.max_push_bytes.as_u64());
+    let local = handle.local().clone();
+    let pack = async move {
+        local
+            .spool_pack(pack_reader, max_bytes)
+            .instrument(tracing::info_span!(
+                "receive.body",
+                http_version = ?version,
+                response_start = start.as_str(),
+            ))
+            .await
+    };
+
     if !caps.side_band_64k {
         // No sideband: the response is the report alone, after the work.
-        let guard = handle.sync_full().await?;
+        let mut sync = Box::pin(handle.sync_full());
+        let (spooled, synced) = match receive_during(pack, &mut sync).await {
+            Ok(received) => received,
+            Err(e) => return Ok(receive_response(reception_refusal(&caps, &txn, &e).await)),
+        };
+        let guard = match synced {
+            Some(synced) => synced,
+            None => sync.await,
+        }?;
         let report = receive_pack_process(
-            st,
-            &handle,
-            guard,
-            txn,
-            caps,
-            pack_reader,
-            &principal,
-            request_id,
+            st, &handle, guard, txn, caps, spooled, &principal, request_id,
         )
         .await?;
         return Ok(receive_response(report));
@@ -668,71 +697,39 @@ pub async fn receive_pack(
 
     // Streaming: the report comes at the end; everything before it is band-2
     // narration (sync/materialize progress, heartbeat), so the connection is
-    // never silent while this host brings a big repository's side-files in.
-    let (mut writer, body) = write_body_pipe(64 * 1024);
-    let handle = handle.clone();
-    let st_arc = st.clone();
-    let repo = route.id.to_string();
-    let who = principal.clone();
-    tokio::spawn(async move {
-        use tokio::io::AsyncWriteExt;
-        let t0 = std::time::Instant::now();
-        let _ = say(
-            &mut writer,
-            &format!("gitcask: {repo} — push by {}", who.name),
-        )
-        .await;
-        let guard = match sync_narrated(&handle, &mut writer, t0).await {
-            Ok(g) => g,
-            Err(e) => {
-                tracing::warn!(repo = %repo, error = %e, "receive-pack: sync failed");
-                let report =
-                    refusal_report(&caps, &txn, &format!("gitcask: sync failed: {e}")).await;
-                let _ = writer.write_all(&report).await;
-                let _ = writer.flush().await;
-                return;
+    // never silent while this host brings a big repository's side-files in,
+    // indexes the pack and publishes it. The task writes the whole response to
+    // `out`; `forward` copies it to the client once the response has started.
+    let (pipe, body) = write_body_pipe(64 * 1024);
+    let (out, lines) = narration_channel();
+    let (answer, answered) = tokio::sync::oneshot::channel::<Option<Vec<u8>>>();
+    let push = PushCommands {
+        who: principal.clone(),
+        txn,
+        caps,
+        request_id,
+    };
+    tokio::spawn(receive_pack_narrated(
+        st.clone(),
+        handle.clone(),
+        push,
+        pack,
+        start,
+        out,
+        answer,
+    ));
+    if start == ResponseStart::AfterEof {
+        match answered.await {
+            Ok(None) => {}
+            Ok(Some(report)) => return Ok(receive_response(report)),
+            Err(_) => {
+                return Err(ApiError::Internal(
+                    "receive-pack ended before the request body".into(),
+                ));
             }
-        };
-        if t0.elapsed().as_secs() >= 2 {
-            let _ = say(
-                &mut writer,
-                &format!(
-                    "local copy ready ({:.1}s); unpacking and checking your objects…",
-                    t0.elapsed().as_secs_f64()
-                ),
-            )
-            .await;
         }
-        let txn_for_report = gitcask_proto::v1::RefTransaction {
-            updates: txn.updates.clone(),
-            ..Default::default()
-        };
-        let report = match receive_pack_process(
-            &st_arc,
-            &handle,
-            guard,
-            txn,
-            caps.clone(),
-            pack_reader,
-            &who,
-            request_id,
-        )
-        .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(repo = %repo, error = %e.message(), "receive-pack failed");
-                let message = if e.status() == StatusCode::SERVICE_UNAVAILABLE {
-                    "gitcask: transient storage failure; retry this push".to_string()
-                } else {
-                    format!("gitcask: {}", e.message())
-                };
-                refusal_report(&caps, &txn_for_report, &message).await
-            }
-        };
-        let _ = writer.write_all(&report).await;
-        let _ = writer.flush().await;
-    });
+    }
+    tokio::spawn(forward(lines, pipe));
     Ok(stream_response(
         "application/x-git-receive-pack-result",
         no_cache_headers(),
@@ -740,7 +737,165 @@ pub async fn receive_pack(
     ))
 }
 
-/// Everything after the sync: unpack, connectivity, publish → the
+/// When a side-band receive-pack response starts (D52).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResponseStart {
+    /// With the request (HTTP/2): narration is live from the first line.
+    Live,
+    /// Once the request body has ended (HTTP/1.x, and every no-sideband push):
+    /// narration said meanwhile is replayed first.
+    AfterEof,
+}
+
+impl ResponseStart {
+    fn as_str(self) -> &'static str {
+        match self {
+            ResponseStart::Live => "live",
+            ResponseStart::AfterEof => "after_eof",
+        }
+    }
+}
+
+/// A parsed push request, minus its pack.
+struct PushCommands {
+    who: crate::auth::Principal,
+    txn: gitcask_proto::v1::RefTransaction,
+    caps: gitcask_git::receive::ReceiveCaps,
+    request_id: Option<String>,
+}
+
+/// Receive the pack while `sync` runs. Returns the spooled pack and the sync's
+/// output if it already finished. On a reception failure that output (a read
+/// guard) is dropped here and the caller's drop of the unfinished `sync`
+/// cancels it.
+async fn receive_during<S: std::future::Future>(
+    spool: impl std::future::Future<Output = Result<gitcask_git::SpooledPack, gitcask_git::GitError>>,
+    sync: &mut std::pin::Pin<Box<S>>,
+) -> Result<(gitcask_git::SpooledPack, Option<S::Output>), gitcask_git::GitError> {
+    tokio::pin!(spool);
+    let mut synced = None;
+    loop {
+        tokio::select! {
+            received = &mut spool => return received.map(|pack| (pack, synced)),
+            done = sync.as_mut(), if synced.is_none() => synced = Some(done),
+        }
+    }
+}
+
+/// The complete answer to a push whose pack could not be received
+/// (oversize, unreadable or abandoned body).
+async fn reception_refusal(
+    caps: &gitcask_git::receive::ReceiveCaps,
+    txn: &gitcask_proto::v1::RefTransaction,
+    e: &gitcask_git::GitError,
+) -> Vec<u8> {
+    let msg = format!("unpack failed: {e}");
+    tracing::warn!(error = %msg, "receive-pack: pack reception failed");
+    metrics::counter!("gitcask_push_refused_total", "reason" => "body").increment(1);
+    refusal_report(caps, txn, &msg).await
+}
+
+/// The side-band receive-pack. Everything it says goes to `out`: the banner,
+/// the sync's narration while the pack uploads, then index-pack, connectivity,
+/// publish and the report. With [`ResponseStart::AfterEof`] the handler waits on
+/// `answer`: `None` once the body has ended (start the response, replaying
+/// `out`), `Some(report)` for a complete refusal before it did.
+async fn receive_pack_narrated(
+    st: Arc<AppState>,
+    handle: Arc<gitcask_wal::RepoHandle>,
+    push: PushCommands,
+    pack: impl std::future::Future<Output = Result<gitcask_git::SpooledPack, gitcask_git::GitError>>,
+    start: ResponseStart,
+    mut out: crate::stream::ChannelWriter,
+    answer: tokio::sync::oneshot::Sender<Option<Vec<u8>>>,
+) {
+    use tokio::io::AsyncWriteExt;
+    let PushCommands {
+        who,
+        txn,
+        caps,
+        request_id,
+    } = push;
+    let repo = handle.id().to_string();
+    let t0 = std::time::Instant::now();
+    let _ = say(&mut out, &format!("gitcask: {repo} — push by {}", who.name)).await;
+    let narration = out.clone();
+    let h = &handle;
+    let mut sync = Box::pin(async move {
+        let mut narration = narration;
+        let synced = sync_narrated(h, &mut narration, t0).await;
+        (synced, t0.elapsed())
+    });
+    let (spooled, synced) = match receive_during(pack, &mut sync).await {
+        Ok(received) => received,
+        Err(e) => {
+            let report = reception_refusal(&caps, &txn, &e).await;
+            match start {
+                ResponseStart::AfterEof => {
+                    let _ = answer.send(Some(report));
+                }
+                ResponseStart::Live => {
+                    let _ = out.write_all(&report).await;
+                }
+            }
+            return;
+        }
+    };
+    let _ = answer.send(None);
+    let (synced, sync_took) = match synced {
+        Some(synced) => synced,
+        None => sync.await,
+    };
+    let guard = match synced {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(repo = %repo, error = %e, "receive-pack: sync failed");
+            let report = refusal_report(&caps, &txn, &format!("gitcask: sync failed: {e}")).await;
+            let _ = out.write_all(&report).await;
+            return;
+        }
+    };
+    if sync_took.as_secs() >= 2 {
+        let _ = say(
+            &mut out,
+            &format!(
+                "local copy ready ({:.1}s); unpacking and checking your objects…",
+                sync_took.as_secs_f64()
+            ),
+        )
+        .await;
+    }
+    let txn_for_report = gitcask_proto::v1::RefTransaction {
+        updates: txn.updates.clone(),
+        ..Default::default()
+    };
+    let report = match receive_pack_process(
+        &st,
+        &handle,
+        guard,
+        txn,
+        caps.clone(),
+        spooled,
+        &who,
+        request_id,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(repo = %repo, error = %e.message(), "receive-pack failed");
+            let message = if e.status() == StatusCode::SERVICE_UNAVAILABLE {
+                "gitcask: transient storage failure; retry this push".to_string()
+            } else {
+                format!("gitcask: {}", e.message())
+            };
+            refusal_report(&caps, &txn_for_report, &message).await
+        }
+    };
+    let _ = out.write_all(&report).await;
+}
+
+/// Everything after reception and the sync: unpack, connectivity, publish → the
 /// report-status bytes (already sideband-framed when the client asked).
 async fn receive_pack_process(
     st: &AppState,
@@ -748,20 +903,20 @@ async fn receive_pack_process(
     _guard: gitcask_wal::ReadGuard<'_>,
     mut txn: gitcask_proto::v1::RefTransaction,
     caps: gitcask_git::receive::ReceiveCaps,
-    pack_reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+    pack: gitcask_git::SpooledPack,
     principal: &crate::auth::Principal,
     request_id: Option<String>,
 ) -> Result<Vec<u8>, ApiError> {
     let route_id = handle.id().clone();
-    let max_bytes = Some(st.cfg.server.max_push_bytes.as_u64());
     let opts = gitcask_git::IngestOptions {
         fsck: st.cfg.wal.fsck_objects,
-        max_bytes,
+        // Reception enforced `server.max_push_bytes`.
+        max_bytes: None,
         thin: true,
     };
     let local = handle.local().clone();
     let ingest = local
-        .ingest_pack(pack_reader, opts)
+        .ingest_spooled(pack, opts)
         .instrument(tracing::info_span!("receive.ingest"))
         .await;
 

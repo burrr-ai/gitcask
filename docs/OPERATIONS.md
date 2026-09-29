@@ -42,7 +42,7 @@ not a substitute for a repository listing.
 |---|---|---|---|
 | `gitcask_auth_introspect_total{outcome}` | `hit` for cached answers; `miss` for uncached verifies (including followers); `active`/`inactive` for upstream token answers | `error` counts unavailable upstream calls; inactive includes invalid principal/scope/TTL answers. Service errors never enter the cache | any sustained `error`; a logged endpoint 401/403 means gitcask's service secret was rejected |
 | `gitcask_auth_introspect_seconds` | upstream calls below `auth.introspect.timeout` | elapsed HTTP request/body/parse time on the single-flight leader, including failures; no token/principal labels | p99 approaching the timeout for 5 minutes |
-| `gitcask_push_refused_total{reason}` | flat outside deploys | `connectivity` = object-closure failure on a new tip, `unpack` = pack parse/index failure, `draining` = a push during serving drain | one `connectivity`/`unpack` immediately; one `draining` outside a deploy window |
+| `gitcask_push_refused_total{reason}` | flat outside deploys | `connectivity` = object-closure failure on a new tip, `unpack` = pack parse/index failure, `body` = the pack body was not received (over `server.max_push_bytes`, read error, client abort), `draining` = a push during serving drain | one `connectivity`/`unpack` immediately; `body` only as a sustained rate (a Ctrl-C'd push counts); one `draining` outside a deploy window |
 | `gitcask_publish_local_apply_failed_total` | 0 | the manifest CAS succeeded but applying refs locally on that instance failed. The next sync repairs it, but it is the lead on an immediate-visibility regression | on any increase |
 | `gitcask_pending_marker_put_failures_total` | 0 | the push committed but the best-effort marker PUT that wakes the maintainer failed | on any increase; check that repository by hand |
 | `gitcask_store_retries_total{op}` | usually flat | transient S3 errors (5xx, 429/throttling, connection failures) being retried internally | warn if still climbing after 5 minutes |
@@ -66,12 +66,14 @@ not a substitute for a repository listing.
 
 There is no dedicated store-latency Prometheus metric. Do not build dashboards on series that do not exist —
 derive p50/p95/p99 from the JSON logs: `span.name = store.get|store.head|store.put|store.delete` with
-`elapsed_ms` and `outcome`. Push breaks down into `receive.ingest`, `git.ingest_pack`,
-`receive.connectivity`, `receive.publish` and `wal.publish` spans. For clone/fetch, total streaming time is
+`elapsed_ms` and `outcome`. Push breaks down into `receive.body` (request-body reception, overlapping the
+sync; fields `http_version` and `response_start` = `live` | `after_eof`, with `git.spool_pack`: `bytes`
+and `outcome`), `receive.ingest`, `git.ingest_pack`, `receive.connectivity`,
+`receive.publish` and `wal.publish` spans. For clone/fetch, total streaming time is
 judged by the git client's own timing plus the band-2 progress lines; cold sync splits into `wal.sync`,
 `wal.materialize`, `wal.reconcile_packs`, `wal.download_pack`, and pack computation into `git.upload_pack`.
 
-`gitcask_push_refused_total` is not the sum of all push failures — only the three refusals in the table. A ref
+`gitcask_push_refused_total` is not the sum of all push failures — only the four refusals in the table. A ref
 conflict is reported as git protocol `ng` and can be HTTP 200; publish/store failures are judged by 503s or by
 pkt-line errors in an already-started stream plus the logs. There is also no general HTTP status /
 request-duration Prometheus metric today.
@@ -94,7 +96,18 @@ meaning are defined in [INTEGRITY](INTEGRITY.md) only.
    `local copy is missing packs` / `local copy ready (...s)` to split before/after sync.
 2. Look at `gitcask_store_retries_total`, store error outcomes and `store.* elapsed_ms`. If every repository
    is slow at once, suspect S3 or the network first.
-3. Long `wal.materialize`/`wal.download_pack` with only the first request slow = cold cache. Long
+3. Long `wal.materialize`/`wal.download_pack` with only the first request slow = cold cache. Which way a
+   push answered is on its `receive.body` span (D52): `response_start = after_eof` (HTTP/1.x, or no
+   side-band) means no HTTP status or band-2 line left before the request body ended — the client shows
+   only its own upload progress, and the sync narration said meanwhile is replayed right after the
+   banner; `live` (side-band over HTTP/2) narrates from the start. `http_version` is the version of the
+   connection reaching gitcask (the last hop), not the client's: a direct or standalone git client over
+   `http://` and any HTTP/1.1 proxy hop give `after_eof`; `live` appears only behind a proxy speaking
+   prior-knowledge h2c to gitcask. A long `git.spool_pack` is the upload
+   itself, and `outcome = error|cancelled` with `bytes` below the client's pack size means the body
+   stopped arriving (client or proxy), before any gitcask work. A `live` push that stalls there behind a
+   proxy speaking HTTP/2 to gitcask and HTTP/1.x to the client is that proxy dropping the body after an
+   early response: front gitcask with HTTP/1.1 instead. Long
    `git.ingest_pack` inside `receive.ingest` = pack indexing/fsck; long `receive.connectivity` = the object
    graph walk; long `wal.publish` = the PUT/CAS phase.
 4. Check `gitcask_lock_wait_seconds`, `gitcask_runtime_stall_total`, `gitcask_http_inflight`. On an
@@ -227,7 +240,8 @@ role, not by raising worker counts on one instance. Distinguish the signals:
 
 - **Add serving**: store, disk and locks healthy, but client latency and `gitcask_http_inflight` are high on
   several instances at once. Concurrent git work on one repository also shares the
-  `server.max_concurrent_per_repo` semaphore.
+  `server.max_concurrent_per_repo` semaphore; over HTTP/1.x a side-band push holds its permit for the whole
+  upload (D52), so slow uploaders to one repository count against it.
 - **Add maintainers**: `gitcask_pending_markers` does not converge and every maintainer's workers stay busy.
   First confirm one worker has the disk headroom to materialize. Do not hide a CPU bottleneck by raising
   thread counts past the D11 default.
@@ -238,7 +252,8 @@ Size the disk so the sum of the following stays below the watermark:
 
 1. Live packs + idx/rev/bitmap/commit-graph of the repositories concurrently active on this instance.
 2. Packs being materialized by `maintenance.workers` concurrent workers.
-3. Scratch/output packs from receive-pack ingest and compaction — during compaction, inputs and outputs
+3. Received push bodies (unlinked spool files, invisible to `du` but counted by the filesystem) and
+   scratch/output packs from receive-pack ingest and compaction — during compaction, inputs and outputs
    coexist.
 4. Headroom up to `disk_high_watermark`, plus whatever else lives on the cache filesystem.
 

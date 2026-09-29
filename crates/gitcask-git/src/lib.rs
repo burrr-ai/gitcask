@@ -17,6 +17,7 @@ mod types;
 pub use advertise::build_v2_fetch_request;
 pub use error::{GitError, validate_oid, validate_ref_name, validate_ref_update};
 pub use gix_hash::{self, ObjectId};
+pub use ingest::SpooledPack;
 pub use local::LocalRepo;
 pub use maintain::write_rev_from_idx;
 pub use refs::RefView;

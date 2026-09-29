@@ -14,100 +14,124 @@ impl LocalRepo {
 
     // ---- packs ----
 
-    /// Stream a packfile in, index it with `git index-pack`, and install
+    /// Receive a packfile to EOF into an anonymous temporary file under
+    /// `objects/pack/`, bounded by `max_bytes`. This is the only step that
+    /// reads the caller's stream: receive-pack runs it alongside the sync and,
+    /// over HTTP/1.x, finishes it (request body at EOF) before its HTTP
+    /// response starts (D52), then indexes the result with
+    /// [`LocalRepo::ingest_spooled`]. The file is unlinked as it is created
+    /// (`O_TMPFILE` on Linux), so refusal, error, a cancelled request or a
+    /// crash leaves nothing on disk, and reception does not hold the ingest
+    /// lock: a slow upload never queues another push to this repository.
+    ///
+    /// The span records the bytes received so far and how reception ended
+    /// (`eof`, `too_large`, `error`, `cancelled`) on every exit, so a partial
+    /// upload is visible in the logs.
+    pub async fn spool_pack<R: AsyncRead + Unpin + Send>(
+        &self,
+        mut pack: R,
+        max_bytes: Option<u64>,
+    ) -> Result<SpooledPack, GitError> {
+        let span = tracing::info_span!(
+            "git.spool_pack",
+            repo = %self.inner.id,
+            bytes = 0u64,
+            outcome = tracing::field::Empty,
+        );
+        let mut reception = Reception {
+            span: span.clone(),
+            bytes: 0,
+            outcome: "cancelled",
+        };
+        let pack_dir = self.objects_pack_dir();
+        std::fs::create_dir_all(&pack_dir).map_err(GitError::Io)?;
+        let file = tempfile::tempfile_in(&pack_dir).map_err(GitError::Io)?;
+        let mut tmp = tokio::fs::File::from_std(file);
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = match pack.read(&mut buf).instrument(span.clone()).await {
+                Ok(n) => n,
+                Err(e) => {
+                    reception.outcome = "error";
+                    return Err(GitError::Io(e));
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            reception.bytes += n as u64;
+            if let Some(max) = max_bytes {
+                if reception.bytes > max {
+                    reception.outcome = "too_large";
+                    return Err(GitError::InvalidInput(format!(
+                        "pack exceeds max_bytes {max}"
+                    )));
+                }
+            }
+            if let Err(e) = tmp.write_all(&buf[..n]).instrument(span.clone()).await {
+                reception.outcome = "error";
+                return Err(GitError::Io(e));
+            }
+        }
+        // tokio's File buffers writes in a background blocking task and does
+        // NOT flush on drop: without this the tail of the pack may be missing
+        // when index-pack reads it back (seen as "failed to fill whole buffer"
+        // under load).
+        if let Err(e) = tmp.flush().instrument(span.clone()).await {
+            reception.outcome = "error";
+            return Err(GitError::Io(e));
+        }
+        reception.outcome = "eof";
+        Ok(SpooledPack {
+            file: tmp.into_std().await,
+            bytes: reception.bytes,
+        })
+    }
+
+    /// [`LocalRepo::spool_pack`] (bounded by `opts.max_bytes`) followed by
+    /// [`LocalRepo::ingest_spooled`], for callers whose input is a local
+    /// stream rather than an HTTP request.
+    pub async fn ingest_pack<R: AsyncRead + Unpin + Send>(
+        &self,
+        pack: R,
+        opts: IngestOptions,
+    ) -> Result<Option<IngestedPack>, GitError> {
+        let spooled = self.spool_pack(pack, opts.max_bytes).await?;
+        self.ingest_spooled(spooled, opts).await
+    }
+
+    /// Index a received pack with `git index-pack`, and install
     /// `pack-<checksum>.{pack,idx,rev}` into `objects/pack/`. Thin packs
     /// (`opts.thin`, every receive-pack) use `--fix-thin` against this
     /// repo's ODB. Empty input returns Ok(None). `opts.fsck` adds
     /// `--fsck-objects` so object parse happens in the same pass as
     /// indexing (a large repository: 64 k objects used to spend tens of seconds in a
-    /// second gix walk after a gix write).
-    pub async fn ingest_pack<R: AsyncRead + Unpin + Send + 'static>(
+    /// second gix walk after a gix write). `opts.max_bytes` is not used here:
+    /// reception ([`LocalRepo::spool_pack`]) enforces it.
+    pub async fn ingest_spooled(
         &self,
-        mut pack: R,
+        pack: SpooledPack,
         opts: IngestOptions,
     ) -> Result<Option<IngestedPack>, GitError> {
         let span = tracing::info_span!(
             "git.ingest_pack",
             repo = %self.inner.id,
             objects = 0u64,
-            bytes = 0u64,
+            bytes = pack.bytes,
             engine = "git",
             thin = opts.thin,
             feed_ms = 0u64,
             git_ms = 0u64,
         );
+        if pack.bytes == 0 {
+            return Ok(None);
+        }
         // Instrument each awaited operation rather than carrying a thread-local
         // span guard across await points.
         // Pack installation and repository refresh are not safe concurrently
         // with gix's pack/index readers. Serialize ingestion per repository;
         // callers may still run ingests for different repositories in parallel.
         let _ingest_guard = self.inner.ingest_lock.lock().instrument(span.clone()).await;
-
-        let pack_dir = self.objects_pack_dir();
-        std::fs::create_dir_all(&pack_dir).map_err(GitError::Io)?;
-
-        // Reserve the temporary path atomically. A timestamp suffix alone can
-        // collide when many ingest calls start in the same scheduler tick.
-        let (tmp_path, tmp_file) = loop {
-            let candidate = pack_dir.join(format!("tmp-ingest-{}.pack", unique_suffix()));
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&candidate)
-            {
-                Ok(file) => break (candidate, file),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(GitError::Io(e)),
-            }
-        };
-        let mut tmp = tokio::fs::File::from_std(tmp_file);
-        let mut total: u64 = 0;
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut empty_check = true;
-        loop {
-            let n = pack
-                .read(&mut buf)
-                .instrument(span.clone())
-                .await
-                .map_err(GitError::Io)?;
-            if n == 0 {
-                break;
-            }
-            empty_check = false;
-            total += n as u64;
-            if let Some(max) = opts.max_bytes {
-                if total > max {
-                    drop(
-                        tokio::fs::remove_file(&tmp_path)
-                            .instrument(span.clone())
-                            .await,
-                    );
-                    return Err(GitError::InvalidInput(format!(
-                        "pack exceeds max_bytes {max}"
-                    )));
-                }
-            }
-            tmp.write_all(&buf[..n])
-                .instrument(span.clone())
-                .await
-                .map_err(GitError::Io)?;
-        }
-        // tokio's File buffers writes in a background blocking task and does
-        // NOT flush on drop: without this the tail of the pack may be missing
-        // when index-pack reads it back (seen as "failed to fill whole buffer"
-        // under load).
-        tmp.flush()
-            .instrument(span.clone())
-            .await
-            .map_err(GitError::Io)?;
-        drop(tmp);
-        span.record("bytes", total);
-        if empty_check {
-            let _ = tokio::fs::remove_file(&tmp_path)
-                .instrument(span.clone())
-                .await;
-            return Ok(None);
-        }
 
         // `git index-pack` is the receive-pack ingest engine: it is the tool
         // that `--fix-thin` + `--threads` + `--fsck-objects` + `--rev-index`
@@ -116,7 +140,7 @@ impl LocalRepo {
         // already fell back here). A large repository: 64,317 objects / 75 MB in 49.1 s
         // on that path (2026-08-21).
         let repo_path = self.inner.path.clone();
-        let tmp_for_index = tmp_path.clone();
+        let input = pack.file;
         let fix_thin = opts.thin;
         let fsck = opts.fsck;
         let index_span = tracing::info_span!(
@@ -126,16 +150,11 @@ impl LocalRepo {
             git_ms = 0u64,
             phases = tracing::field::Empty,
         );
-        let indexed = tokio::task::spawn_blocking(move || {
-            git_index_pack(&tmp_for_index, &repo_path, fix_thin, fsck)
-        })
-        .instrument(index_span.clone())
-        .await
-        .map_err(|e| GitError::Io(std::io::Error::other(e)));
-        let _ = tokio::fs::remove_file(&tmp_path)
-            .instrument(span.clone())
-            .await;
-        let outcome = indexed??;
+        let outcome =
+            tokio::task::spawn_blocking(move || git_index_pack(input, &repo_path, fix_thin, fsck))
+                .instrument(index_span.clone())
+                .await
+                .map_err(|e| GitError::Io(std::io::Error::other(e)))??;
         index_span.record("feed_ms", outcome.feed_ms);
         index_span.record("git_ms", outcome.git_ms);
         index_span.record("phases", outcome.phases.as_str());
@@ -301,6 +320,36 @@ fn unique_suffix() -> String {
         .unwrap_or(0);
     format!("{}-{}", std::process::id(), nanos)
 }
+/// A pack body received to EOF by [`LocalRepo::spool_pack`]: an anonymous
+/// (already unlinked) file, freed when this value is dropped.
+#[derive(Debug)]
+pub struct SpooledPack {
+    file: std::fs::File,
+    bytes: u64,
+}
+
+impl SpooledPack {
+    /// Pack bytes received (after any content decoding).
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
+
+/// Records how pack reception ended on its span, including when the future
+/// is dropped mid-read (`cancelled`).
+struct Reception {
+    span: tracing::Span,
+    bytes: u64,
+    outcome: &'static str,
+}
+
+impl Drop for Reception {
+    fn drop(&mut self) {
+        self.span.record("bytes", self.bytes);
+        self.span.record("outcome", self.outcome);
+    }
+}
+
 fn idx_object_count(idx_path: &Path) -> Result<u64, GitError> {
     use std::io::{Read, Seek};
     let mut f = std::fs::File::open(idx_path).map_err(GitError::Io)?;
@@ -331,12 +380,13 @@ struct IndexPackOutcome {
 }
 
 fn git_index_pack(
-    input: &Path,
+    mut input: std::fs::File,
     repo_path: &Path,
     fix_thin: bool,
     fsck: bool,
 ) -> Result<IndexPackOutcome, GitError> {
-    let file = std::fs::File::open(input).map_err(GitError::Io)?;
+    use std::io::Seek;
+    input.rewind().map_err(GitError::Io)?;
     // `--threads=0` = auto (ncpus). `--rev-index` writes `.rev` in the same
     // pass so the next pack-objects does not rebuild a reverse index in RAM.
     // `--fsck-objects` parses commits/trees/tags while resolving — one walk,
@@ -390,8 +440,7 @@ fn git_index_pack(
         let mut stdin = child.stdin.take().ok_or_else(|| {
             GitError::Io(std::io::Error::other("git index-pack stdin unavailable"))
         })?;
-        let mut file = file;
-        std::io::copy(&mut file, &mut stdin).map_err(GitError::Io)?;
+        std::io::copy(&mut input, &mut stdin).map_err(GitError::Io)?;
     }
     let feed_ms = feed_started.elapsed().as_millis() as u64;
     let output = child.wait_with_output().map_err(GitError::Io)?;
@@ -596,7 +645,8 @@ mod index_pack_trace_tests {
         assert!(o.status.success());
         let input = dir.path().join("in.pack");
         std::fs::write(&input, &pack).unwrap();
-        let outcome = git_index_pack(&input, &dest, false, true).expect("index-pack");
+        let input = std::fs::File::open(&input).unwrap();
+        let outcome = git_index_pack(input, &dest, false, true).expect("index-pack");
         assert!(outcome.object_count > 0);
         assert!(
             outcome.git_ms > 0 || outcome.feed_ms > 0,
