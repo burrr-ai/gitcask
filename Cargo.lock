@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "gitcask-cli"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -1601,7 +1601,7 @@ dependencies = [
 
 [[package]]
 name = "gitcask-config"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "bytesize",
@@ -1614,7 +1614,7 @@ dependencies = [
 
 [[package]]
 name = "gitcask-git"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1650,7 +1650,7 @@ dependencies = [
 
 [[package]]
 name = "gitcask-proto"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "bytes",
  "prost",
@@ -1660,7 +1660,7 @@ dependencies = [
 
 [[package]]
 name = "gitcask-server"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -1707,6 +1707,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tokio-stream",
  "tokio-util",
  "tower",
@@ -1719,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "gitcask-store"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1747,7 +1748,7 @@ dependencies = [
 
 [[package]]
 name = "gitcask-wal"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "bytes",

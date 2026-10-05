@@ -324,7 +324,7 @@ fn unique_suffix() -> String {
 /// (already unlinked) file, freed when this value is dropped.
 #[derive(Debug)]
 pub struct SpooledPack {
-    file: std::fs::File,
+    pub(crate) file: std::fs::File,
     bytes: u64,
 }
 
@@ -350,7 +350,7 @@ impl Drop for Reception {
     }
 }
 
-fn idx_object_count(idx_path: &Path) -> Result<u64, GitError> {
+pub(crate) fn idx_object_count(idx_path: &Path) -> Result<u64, GitError> {
     use std::io::{Read, Seek};
     let mut f = std::fs::File::open(idx_path).map_err(GitError::Io)?;
     let mut head = [0u8; 8];

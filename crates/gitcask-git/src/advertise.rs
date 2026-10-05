@@ -47,7 +47,7 @@ impl LocalRepo {
         // Resolve HEAD's target before filtering: a ref-prefix that excludes the
         // target ref must not prevent HEAD itself from being advertised.
         let head_oid = if head_target.is_empty() {
-            None
+            (!snap.head_oid.is_empty()).then(|| snap.head_oid.clone())
         } else {
             snap.refs
                 .binary_search_by(|r| r.name.as_str().cmp(head_target.as_str()))
@@ -103,19 +103,19 @@ impl LocalRepo {
                 .ref_prefixes
                 .iter()
                 .any(|p| "HEAD".starts_with(p.as_str()));
-        if head_matches && !head_target.is_empty() {
+        if head_matches {
             match head_oid {
                 Some(oid) => lines.push(LsRefsLine {
                     name: "HEAD".to_string(),
                     oid,
                     peeled: String::new(),
-                    symref_target: Some(head_target.clone()),
+                    symref_target: (!head_target.is_empty()).then(|| head_target.clone()),
                 }),
-                None if args.unborn => lines.push(LsRefsLine {
+                None if args.unborn && !head_target.is_empty() => lines.push(LsRefsLine {
                     name: "HEAD".to_string(),
                     oid: "unborn".to_string(),
                     peeled: String::new(),
-                    symref_target: Some(head_target.clone()),
+                    symref_target: (!head_target.is_empty()).then(|| head_target.clone()),
                 }),
                 None => {}
             }
@@ -130,44 +130,46 @@ impl LocalRepo {
         let caps = capabilities_for(service, self.inner.format);
         let caps_line = format!("\0{}\n", caps);
 
-        if snap.refs.is_empty() {
-            // No refs: emit the capabilities line with a zero id and
-            // `capabilities^{}`.
-            let zero = zero_hex(self.inner.format);
-            let line = format!("{zero} capabilities^{{}}{caps_line}");
-            pkt::encode_data(out, line.as_bytes());
+        let head_oid = if snap.head_target.is_empty() {
+            snap.head_oid.clone()
         } else {
-            let head_target = snap.head_target;
-            let mut first = true;
-            for r in &snap.refs {
-                let mut line = format!("{} {}", r.oid, r.name);
-                if first {
-                    line.push_str(&caps_line);
-                    first = false;
-                } else {
-                    line.push('\n');
-                }
-                pkt::encode_data(out, line.as_bytes());
-                // Peeled annotated tags (`<oid> refs/tags/x^{}`), like git's
-                // `packed-refs`-backed advertisement.
-                if !r.peeled.is_empty() && r.peeled != r.oid {
-                    let peeled = format!("{} {}^{{}}\n", r.peeled, r.name);
-                    pkt::encode_data(out, peeled.as_bytes());
-                }
+            snap.refs
+                .iter()
+                .find(|r| r.name == snap.head_target)
+                .map(|r| r.oid.clone())
+                .unwrap_or_default()
+        };
+        let mut caps = caps;
+        if !snap.head_target.is_empty() && service == Service::UploadPack {
+            caps.push_str(" symref=HEAD:");
+            caps.push_str(&snap.head_target);
+        }
+        let mut first = true;
+        if !head_oid.is_empty() && service == Service::UploadPack {
+            pkt::encode_data(out, format!("{head_oid} HEAD\0{caps}\n").as_bytes());
+            first = false;
+        }
+        for r in &snap.refs {
+            let mut line = format!("{} {}", r.oid, r.name);
+            if first {
+                line.push('\0');
+                line.push_str(&caps);
+                line.push('\n');
+                first = false;
+            } else {
+                line.push('\n');
             }
-            // Include HEAD if it has a resolvable target and isn't already the
-            // first advertised ref (upload-pack advertises HEAD).
-            if !head_target.is_empty() && service == Service::UploadPack {
-                if let Some(oid) = snap
-                    .refs
-                    .iter()
-                    .find(|r| r.name == head_target)
-                    .map(|r| r.oid.clone())
-                {
-                    let head_line = format!("{oid} HEAD\n");
-                    pkt::encode_data(out, head_line.as_bytes());
-                }
+            pkt::encode_data(out, line.as_bytes());
+            if !r.peeled.is_empty() && r.peeled != r.oid {
+                pkt::encode_data(out, format!("{} {}^{{}}\n", r.peeled, r.name).as_bytes());
             }
+        }
+        if first {
+            let zero = zero_hex(self.inner.format);
+            pkt::encode_data(
+                out,
+                format!("{zero} capabilities^{{}}{caps_line}").as_bytes(),
+            );
         }
         pkt::encode_flush(out);
         Ok(())

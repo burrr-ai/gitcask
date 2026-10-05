@@ -21,10 +21,35 @@ pub struct Config {
     pub maintenance: MaintenanceConfig,
     pub lfs: LfsConfig,
     pub git: GitConfig,
+    pub import: ImportConfig,
     /// Links to the systems around a repository.
     #[serde(default)]
     pub telemetry: TelemetryConfig,
     pub events: EventsConfig,
+}
+
+/// Admission bounds for public HTTPS and internal full-history imports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ImportConfig {
+    pub max_refs: usize,
+    pub max_objects: u64,
+    pub max_bytes: ByteSize,
+    #[serde(with = "humantime_serde")]
+    pub timeout: Duration,
+    #[serde(with = "humantime_serde")]
+    pub resolve_timeout: Duration,
+}
+impl Default for ImportConfig {
+    fn default() -> Self {
+        Self {
+            max_refs: 1024,
+            max_objects: 1_000_000,
+            max_bytes: ByteSize(1 << 30),
+            timeout: Duration::from_mins(15),
+            resolve_timeout: Duration::from_secs(30),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -447,6 +472,7 @@ impl Default for Config {
             maintenance: MaintenanceConfig::default(),
             lfs: LfsConfig::default(),
             git: GitConfig::default(),
+            import: ImportConfig::default(),
             telemetry: TelemetryConfig::default(),
             events: EventsConfig::default(),
         }
@@ -728,6 +754,15 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.import.max_refs > 0
+                && self.import.max_refs <= 4096
+                && self.import.max_objects > 0
+                && self.import.max_bytes.as_u64() > 0
+                && !self.import.timeout.is_zero()
+                && !self.import.resolve_timeout.is_zero(),
+            "import limits must be positive; max_refs <= 4096"
+        );
         anyhow::ensure!(!self.store.bucket.is_empty(), "store.bucket must be set");
         if self.server.auth_mode == AuthMode::Jwt {
             let jwt = &self.auth.jwt;

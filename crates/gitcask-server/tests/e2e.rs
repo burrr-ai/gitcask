@@ -1281,11 +1281,7 @@ async fn combined_permission_checks(client: &reqwest::Client, base: &str) -> Tes
         204,
     )
     .await?;
-    expect_auth_status(
-        proxy(client.get(format!("{base}/openapi.json"))),
-        200,
-    )
-    .await?;
+    expect_auth_status(proxy(client.get(format!("{base}/openapi.json"))), 200).await?;
     expect_auth_status(
         proxy(client.post(format!("{repo}/info/lfs/objects/batch")))
             .json(&serde_json::json!({"operation":"upload","objects":[]})),
@@ -2871,6 +2867,7 @@ async fn blocking_work_in_the_install_path_does_not_stall_requests() -> TestResu
         worst = worst.max(t.elapsed().as_millis());
         probes += 1;
     }
+    // SAFETY: the cooperating install-delay tests serialize this mutation with INSTALL_DELAY_ENV_LOCK.
     unsafe { std::env::remove_var("GITCASK_TEST_BLOCK_INSTALL_MS") };
     let took = install.await?;
     assert!(took.as_millis() >= 2500, "{took:?}");

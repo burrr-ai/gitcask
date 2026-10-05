@@ -481,7 +481,7 @@ async fn reject_lfs_pointers(local: &gitcask_git::LocalRepo, tree: &str) -> Resu
     Ok(())
 }
 
-fn has_lfs_pointer_header(blob: &[u8]) -> bool {
+pub(super) fn has_lfs_pointer_header(blob: &[u8]) -> bool {
     // git-lfs DecodeFrom trims surrounding Unicode whitespace, accepts CRLF,
     // and recognizes all three version URLs. Its decoder also allows extension
     // lines before the version. Reject these headers conservatively, even when

@@ -43,6 +43,7 @@ pub struct Ref {
 pub struct RefSnapshotData {
     pub refs: Vec<Ref>,
     pub head_target: String,
+    pub head_oid: String,
 }
 
 impl From<gitcask_proto::v1::RefSnapshot> for RefSnapshotData {
@@ -59,6 +60,7 @@ impl From<gitcask_proto::v1::RefSnapshot> for RefSnapshotData {
         RefSnapshotData {
             refs,
             head_target: s.head_target,
+            head_oid: s.head_oid,
         }
     }
 }
@@ -79,6 +81,7 @@ impl From<RefSnapshotData> for gitcask_proto::v1::RefSnapshot {
             object_format: "sha1".into(),
             refs,
             head_target: d.head_target,
+            head_oid: d.head_oid,
             created_at: None,
         }
     }

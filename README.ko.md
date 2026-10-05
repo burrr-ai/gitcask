@@ -55,16 +55,16 @@ cd demo && git commit --allow-empty -m first && git push -u origin HEAD:main
 
 ## 실행
 
-`linux/amd64`와 `linux/arm64` 이미지를 `ghcr.io/burrr-ai/gitcask:0.0.6`로 제공합니다.
+`linux/amd64`와 `linux/arm64` 이미지를 `ghcr.io/burrr-ai/gitcask:0.0.7`로 제공합니다.
 패치 버전 태그 또는 [릴리스](https://github.com/burrr-ai/gitcask/releases)에 기록된 이미지 digest를
 지정해 배포합니다. 자동으로 바뀌는 `latest` 태그는 제공하지 않습니다.
 
 ```sh
-docker pull ghcr.io/burrr-ai/gitcask:0.0.6
+docker pull ghcr.io/burrr-ai/gitcask:0.0.7
 docker run --rm -p 8080:8080 \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
   -v "$PWD/gitcask.toml:/etc/gitcask/gitcask.toml:ro" \
-  ghcr.io/burrr-ai/gitcask:0.0.6
+  ghcr.io/burrr-ai/gitcask:0.0.7
 ```
 
 운영 설정 파일에는 S3 버킷·리전·엔드포인트와 JWT 또는 introspect 인증을 설정해야 합니다.

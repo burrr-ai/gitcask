@@ -11,7 +11,13 @@ PASS=0; FAIL=0
 ok()  { echo "  ok   $1"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL $1"; FAIL=$((FAIL+1)); }
 check() { if "$@" >/dev/null 2>&1; then ok "$*"; else bad "$*"; fi; }
-s3() { docker run --rm --network host -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION=us-east-1 amazon/aws-cli:latest --endpoint-url http://127.0.0.1:$S3_PORT s3 "$@" 2>/dev/null; }
+s3() {
+  local endpoint="http://127.0.0.1:$S3_PORT" network=host
+  # Docker Desktop containers reach the macOS host through this DNS name;
+  # their host network does not expose the host's published loopback ports.
+  if [ "$(uname -s)" = Darwin ]; then endpoint="http://host.docker.internal:$S3_PORT"; network=bridge; fi
+  docker run --rm --network "$network" -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION=us-east-1 amazon/aws-cli:latest --endpoint-url "$endpoint" s3 "$@" 2>/dev/null
+}
 
 cd "$ROOT"
 echo "== build =="

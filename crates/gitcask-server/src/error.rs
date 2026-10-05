@@ -13,6 +13,7 @@ pub enum ApiError {
     Unauthorized,
     Forbidden,
     IntrospectionUnavailable,
+    ImportUnavailable(String),
     Conflict(String),
     PayloadTooLarge,
     UnsupportedMediaType(String),
@@ -30,6 +31,7 @@ impl ApiError {
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Forbidden => StatusCode::FORBIDDEN,
             ApiError::IntrospectionUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            ApiError::ImportUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
             ApiError::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::UnsupportedMediaType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -62,6 +64,7 @@ impl ApiError {
             ApiError::Unauthorized => "unauthorized".to_string(),
             ApiError::Forbidden => "forbidden".to_string(),
             ApiError::IntrospectionUnavailable => "introspection service unavailable".to_string(),
+            ApiError::ImportUnavailable(m) => format!("import unavailable: {m}"),
             ApiError::Conflict(m) => format!("conflict: {m}"),
             ApiError::PayloadTooLarge => "payload too large".to_string(),
             ApiError::UnsupportedMediaType(m) => format!("unsupported media type: {m}"),
@@ -95,6 +98,8 @@ impl IntoResponse for ApiError {
                 [(axum::http::header::CONTENT_TYPE, "application/json")],
                 if matches!(self, Self::IntrospectionUnavailable) {
                     r#"{"error":"introspection_unavailable","retryable":true}"#
+                } else if matches!(self, Self::ImportUnavailable(_)) {
+                    r#"{"error":"import_unavailable","retryable":true}"#
                 } else {
                     r#"{"error":"store_unavailable","retryable":true}"#
                 },

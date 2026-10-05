@@ -151,7 +151,7 @@ impl Server {
         })
     }
 
-    /// Two instances sharing one MemoryStore, different cache dirs.
+    /// Two instances sharing one `MemoryStore`, different cache dirs.
     pub async fn start_pair() -> Result<(Self, Self)> {
         let mut store = MemoryStore::shared();
         if let Ok(ms) = std::env::var("GITCASK_TEST_MEMORY_LATENCY_MS") {

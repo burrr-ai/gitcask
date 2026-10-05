@@ -15,6 +15,7 @@ pub struct RefView {
     base: Arc<RefSnapshotData>,
     overlay: HashMap<String, Option<String>>,
     head_target: Option<String>,
+    detached_head: Option<String>,
 }
 
 impl RefView {
@@ -23,6 +24,7 @@ impl RefView {
             base,
             overlay: HashMap::new(),
             head_target: None,
+            detached_head: None,
         }
     }
     /// Current oid (or symbolic target for symrefs) of `name`; `None` = absent.
@@ -47,16 +49,23 @@ impl RefView {
     /// HEAD's symbolic target as of the overlay (a pending `HEAD` symref update).
     pub fn set_head_target(&mut self, target: String) {
         self.head_target = Some(target);
+        self.detached_head = Some(String::new());
+        self.overlay.remove("HEAD");
     }
     /// HEAD's oid through its symbolic target (None when unborn/detached-empty).
     pub fn head_oid(&self) -> Option<String> {
         let target = self.head_target().to_string();
         if target.is_empty() {
-            return None;
+            let oid = self.detached_head.as_deref().unwrap_or(&self.base.head_oid);
+            return (!oid.is_empty()).then(|| oid.to_string());
         }
         self.get(&target)
     }
     pub fn set(&mut self, name: &str, value: String) {
+        if name == "HEAD" {
+            self.head_target = Some(String::new());
+            self.detached_head = Some(value.clone());
+        }
         self.overlay.insert(name.to_string(), Some(value));
     }
     pub fn remove(&mut self, name: &str) {
@@ -289,7 +298,7 @@ impl LocalRepo {
         let mut has_oid_cmds = false;
         input.push_str("start\n");
         for u in &txn.updates {
-            if !u.new_symbolic_target.is_empty() {
+            if !u.new_symbolic_target.is_empty() || u.name == "HEAD" {
                 symref_updates.push(u);
                 continue;
             }
@@ -360,8 +369,12 @@ impl LocalRepo {
         // Apply symbolic ref updates by writing the HEAD file directly.
         for u in &symref_updates {
             let head_path = self.inner.path.join("HEAD");
-            std::fs::write(&head_path, format!("ref: {}\n", u.new_symbolic_target))
-                .map_err(GitError::Io)?;
+            let value = if u.new_symbolic_target.is_empty() {
+                format!("{}\n", u.new_oid)
+            } else {
+                format!("ref: {}\n", u.new_symbolic_target)
+            };
+            std::fs::write(&head_path, value).map_err(GitError::Io)?;
         }
         // Patch the snapshot we started from instead of throwing it away: re-parsing
         // packed-refs + peeling 100 k tags was the O(refs) term every push handed to the next
@@ -392,12 +405,19 @@ impl LocalRepo {
     ) -> RefSnapshotData {
         let mut refs = base.refs.clone();
         let mut head_target = base.head_target.clone();
+        let mut head_oid = base.head_oid.clone();
         let mut repo: Option<gix::Repository> = None;
         for u in txns.iter().flat_map(|t| t.updates.iter()) {
             if !u.new_symbolic_target.is_empty() {
                 if u.name == "HEAD" {
-                    head_target = u.new_symbolic_target.clone();
+                    head_target.clone_from(&u.new_symbolic_target);
+                    head_oid.clear();
                 }
+                continue;
+            }
+            if u.name == "HEAD" {
+                head_target.clear();
+                head_oid.clone_from(&u.new_oid);
                 continue;
             }
             let delete = u.new_oid.is_empty() || u.new_oid.chars().all(|c| c == '0');
@@ -434,7 +454,11 @@ impl LocalRepo {
                 }
             }
         }
-        RefSnapshotData { refs, head_target }
+        RefSnapshotData {
+            refs,
+            head_target,
+            head_oid,
+        }
     }
 
     /// Replace ALL refs + HEAD by writing `packed-refs` directly and removing
@@ -472,6 +496,11 @@ impl LocalRepo {
             std::fs::write(path.join("HEAD"), format!("ref: {}\n", snap.head_target))
                 .map_err(GitError::Io)?;
         }
+        if snap.head_target.is_empty() && !snap.head_oid.is_empty() {
+            crate::validate_oid(&snap.head_oid)?;
+            std::fs::write(path.join("HEAD"), format!("{}\n", snap.head_oid))
+                .map_err(GitError::Io)?;
+        }
         self.refresh_refs()?;
         Ok(())
     }
@@ -498,6 +527,7 @@ impl LocalRepo {
         let _enter = span.enter();
         let snap = self.refs()?;
         let mut head_target = snap.head_target;
+        let mut head_oid = snap.head_oid;
         let mut map: BTreeMap<String, Ref> =
             snap.refs.into_iter().map(|r| (r.name.clone(), r)).collect();
         let repo = self.gix();
@@ -506,8 +536,14 @@ impl LocalRepo {
                 validate_ref_update(u)?;
                 if !u.new_symbolic_target.is_empty() {
                     if u.name == "HEAD" {
-                        head_target = u.new_symbolic_target.clone();
+                        head_target.clone_from(&u.new_symbolic_target);
+                        head_oid.clear();
                     }
+                    continue;
+                }
+                if u.name == "HEAD" {
+                    head_target.clear();
+                    head_oid.clone_from(&u.new_oid);
                     continue;
                 }
                 let new_zero = u.new_oid.is_empty() || u.new_oid.chars().all(|c| c == '0');
@@ -539,6 +575,7 @@ impl LocalRepo {
         let data = RefSnapshotData {
             refs: map.into_values().collect(),
             head_target,
+            head_oid,
         };
         self.load_ref_snapshot(&data.into())
     }
@@ -585,6 +622,15 @@ pub(crate) fn read_refs(repo_path: &Path) -> Result<RefSnapshotData, GitError> {
         Err(_) => String::new(),
     };
 
+    let head_oid = if head_target.is_empty() {
+        std::fs::read_to_string(repo_path.join("HEAD"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| crate::validate_oid(s).is_ok())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     let mut map: BTreeMap<String, (String, String)> = BTreeMap::new();
 
     // packed-refs
@@ -625,7 +671,11 @@ pub(crate) fn read_refs(repo_path: &Path) -> Result<RefSnapshotData, GitError> {
         .map(|(name, (oid, peeled))| Ref { name, oid, peeled })
         .collect();
 
-    let mut data = RefSnapshotData { refs, head_target };
+    let mut data = RefSnapshotData {
+        refs,
+        head_target,
+        head_oid,
+    };
     // Only tags can be annotated. Avoid an object lookup for every branch:
     // mirror pushes routinely contain tens of thousands of branch refs, often
     // all pointing at the same commit.

@@ -34,7 +34,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # trixie ships git 2.47+: gitcask wants >= 2.47 on the server
 # (`pack.writeReverseIndex`, `index-pack --rev-index`); clients need >= 2.46.
 FROM docker.io/library/debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git git-lfs ca-certificates tini curl \
+RUN apt-get update && apt-get install -y --no-install-recommends git git-lfs ca-certificates tini curl procps \
     && rm -rf /var/lib/apt/lists/* \
     && git --version
 RUN useradd --uid 1000 --create-home --shell /bin/sh gitcask \

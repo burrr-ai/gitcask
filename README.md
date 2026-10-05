@@ -56,16 +56,16 @@ Data can always be taken out: `git clone --mirror` exports a repository (with `g
 
 ## Running it
 
-Published images are available at `ghcr.io/burrr-ai/gitcask:0.0.6` for `linux/amd64` and
+Published images are available at `ghcr.io/burrr-ai/gitcask:0.0.7` for `linux/amd64` and
 `linux/arm64`. Pin the patch tag or the image digest recorded in the
 [release](https://github.com/burrr-ai/gitcask/releases); there is no floating `latest` tag.
 
 ```sh
-docker pull ghcr.io/burrr-ai/gitcask:0.0.6
+docker pull ghcr.io/burrr-ai/gitcask:0.0.7
 docker run --rm -p 8080:8080 \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
   -v "$PWD/gitcask.toml:/etc/gitcask/gitcask.toml:ro" \
-  ghcr.io/burrr-ai/gitcask:0.0.6
+  ghcr.io/burrr-ai/gitcask:0.0.7
 ```
 
 Provide a production config with your S3 bucket/region/endpoint and JWT or introspection authentication.
@@ -136,7 +136,7 @@ crates/
   gitcask-cli      gitcask serve|import|migrate|compact|wal|repo|token
 ```
 
-Further documentation: [docs/PRODUCT.md](docs/PRODUCT.md) (product boundaries), [docs/DIRECTION.md](docs/DIRECTION.md) (this fork's decisions), [docs/OPERATIONS.md](docs/OPERATIONS.md) (the runbook), [docs/MIGRATION.md](docs/MIGRATION.md) (moving from Gitea), [docs/ROUNDTRIPS.md](docs/ROUNDTRIPS.md) (the cost model), [docs/EVENTS.md](docs/EVENTS.md), [docs/INTEGRITY.md](docs/INTEGRITY.md), [docs/LFS.md](docs/LFS.md).
+Further documentation: [docs/IMPORT.md](docs/IMPORT.md) (pinned full-history import), [docs/INITIALIZE.md](docs/INITIALIZE.md) (parentless tree snapshots), [docs/PRODUCT.md](docs/PRODUCT.md) (product boundaries), [docs/DIRECTION.md](docs/DIRECTION.md) (this fork's decisions), [docs/OPERATIONS.md](docs/OPERATIONS.md) (the runbook), [docs/MIGRATION.md](docs/MIGRATION.md) (moving from Gitea), [docs/ROUNDTRIPS.md](docs/ROUNDTRIPS.md) (the cost model), [docs/EVENTS.md](docs/EVENTS.md), [docs/INTEGRITY.md](docs/INTEGRITY.md), [docs/LFS.md](docs/LFS.md).
 
 ## Contributing
 
