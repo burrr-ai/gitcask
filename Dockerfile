@@ -34,7 +34,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # trixie ships git 2.47+: gitcask wants >= 2.47 on the server
 # (`pack.writeReverseIndex`, `index-pack --rev-index`); clients need >= 2.46.
 FROM docker.io/library/debian:trixie-slim
-RUN apt-get update && apt-get install -y --no-install-recommends git git-lfs ca-certificates tini curl procps \
+# Upgrade inherited PCRE2 too: CVE-2026-103111 is fixed in 10.46-1~deb13u3.
+RUN apt-get update && apt-get install -y --no-install-recommends git git-lfs ca-certificates tini curl procps libpcre2-8-0 \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libpcre2-8-0)" ge '10.46-1~deb13u3' \
     && rm -rf /var/lib/apt/lists/* \
     && git --version
 RUN useradd --uid 1000 --create-home --shell /bin/sh gitcask \
