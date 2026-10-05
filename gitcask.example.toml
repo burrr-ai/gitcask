@@ -174,3 +174,11 @@ lock_wait_warn = "1s"             # WARN "lock wait" (lock, repo, wait_ms, reque
 # webhook_url = "https://hooks.example.com/gitcask"   # each batch of ref events is POSTed as a JSON array
 # webhook_secret = ""             # X-Gitcask-Signature: sha256=<HMAC-SHA256 of the body>; unset = unsigned
 # sweep_interval = "5m"           # LIST pending/ + locally cached repos; warns when unpublished entries are found; 0 = off
+
+# Full-history pristine import; Cloud owns durable job state (docs/IMPORT.md).
+[import]
+max_refs = 1024                         # 1..4096 heads/tags; snapshot JSON <= 1 MiB
+max_objects = 1000000                   # acquired historical objects; never publish above this
+max_bytes = "1 GiB"                    # external response bytes/output pack; also max_push_bytes
+resolve_timeout = "30s"               # refs/HEAD acquisition deadline
+timeout = "15m"                       # bulk acquisition/validation deadline, before WAL CAS

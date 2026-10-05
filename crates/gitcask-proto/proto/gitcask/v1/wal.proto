@@ -55,6 +55,7 @@ message Manifest {
   // One successful pristine-repository initialization; preserved by every
   // subsequent manifest writer, independently of WAL/checkpoint retention.
   Initialization initialization = 13;
+  ImportReceipt import_receipt = 14;
 }
 
 message Initialization {
@@ -64,6 +65,16 @@ message Initialization {
   string commit_oid = 4;
   string tree_oid = 5;
   uint64 seq = 6;
+}
+
+message ImportReceipt {
+  string operation_key = 1;
+  string request_hash = 2;
+  string snapshot_hash = 3;
+  uint64 seq = 4;
+  uint64 refs_count = 5;
+  string head_target = 6;
+  string head_oid = 7;
 }
 
 message LogSegmentRef {
@@ -198,6 +209,8 @@ message RefSnapshot {
   repeated Ref refs = 3;
   // Symbolic target of HEAD, e.g. "refs/heads/main".
   string head_target = 4;
+  // Detached HEAD only; empty when symbolic.
+  string head_oid = 6;
   google.protobuf.Timestamp created_at = 5;
 }
 

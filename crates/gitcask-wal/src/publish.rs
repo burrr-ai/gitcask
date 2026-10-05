@@ -54,6 +54,12 @@ pub struct PublishResult {
     pub per_ref: Vec<(String, Result<(), RefError>)>,
 }
 
+/// A mutually exclusive receipt for a pristine write.
+pub(crate) enum PristineReceipt {
+    Initialization(gitcask_proto::v1::Initialization),
+    Import(gitcask_proto::v1::ImportReceipt),
+}
+
 /// Request sent to the single-flight publisher.
 pub(crate) struct PublishRequest {
     pub(crate) pack: Option<IngestedPack>,
@@ -64,7 +70,7 @@ pub(crate) struct PublishRequest {
     /// Explicit entry time (history replay); None = now. Validated monotonic
     /// (>= the head entry's created_at) before the batch is written.
     pub(crate) created_at: Option<prost_types::Timestamp>,
-    pub(crate) initialization: Option<gitcask_proto::v1::Initialization>,
+    pub(crate) pristine_receipt: Option<PristineReceipt>,
     pub(crate) response: oneshot::Sender<Result<PublishResult, WalError>>,
 }
 
@@ -351,7 +357,11 @@ pub(crate) fn is_null_oid(hex: &str) -> bool {
 pub(crate) fn apply_txn_to_map(txn: &RefTransaction, refs: &mut gitcask_git::RefView) {
     for u in &txn.updates {
         if !u.new_symbolic_target.is_empty() {
-            refs.set(&u.name, u.new_symbolic_target.clone());
+            if u.name == "HEAD" {
+                refs.set_head_target(u.new_symbolic_target.clone());
+            } else {
+                refs.set(&u.name, u.new_symbolic_target.clone());
+            }
         } else if is_null_oid(&u.new_oid) {
             refs.remove(&u.name);
         } else {
@@ -483,7 +493,7 @@ fn verify_batch(
     let mut pristine = is_pristine(manifest);
     for req in batch {
         let mut per_ref = verify_txn(&req.txn, &working_refs);
-        if req.initialization.is_some() && !pristine {
+        if req.pristine_receipt.is_some() && !pristine {
             for (_, result) in &mut per_ref {
                 *result = Err(RefError::Rejected("repository is not pristine".into()));
             }
@@ -524,6 +534,7 @@ pub fn is_pristine(manifest: &Manifest) -> bool {
         && manifest.log_segments.is_empty()
         && manifest.checkpoint.is_none()
         && manifest.initialization.is_none()
+        && manifest.import_receipt.is_none()
 }
 
 fn build_batch(
@@ -919,11 +930,23 @@ async fn process_batch(handle: &RepoHandle, batch: Vec<PublishRequest>) -> Resul
             &writer,
             &new_packs,
         );
-        for (offset, request) in valid_indices.iter().filter_map(|&index| batch.get(index)).enumerate() {
-            if let Some(receipt) = &request.initialization {
-                let mut receipt = receipt.clone();
-                receipt.seq = first_seq + offset as u64;
-                updated.initialization = Some(receipt);
+        for (offset, request) in valid_indices
+            .iter()
+            .filter_map(|&index| batch.get(index))
+            .enumerate()
+        {
+            match &request.pristine_receipt {
+                Some(PristineReceipt::Import(receipt)) => {
+                    let mut receipt = receipt.clone();
+                    receipt.seq = first_seq + offset as u64;
+                    updated.import_receipt = Some(receipt);
+                }
+                Some(PristineReceipt::Initialization(receipt)) => {
+                    let mut receipt = receipt.clone();
+                    receipt.seq = first_seq + offset as u64;
+                    updated.initialization = Some(receipt);
+                }
+                None => {}
             }
         }
         let committed = commit_manifest(handle, updated, known_version, &slot, &span).await;
@@ -1410,7 +1433,9 @@ mod initialization_tests {
             meta: HashMap::new(),
             synced: true,
             created_at: None,
-            initialization: initialize.then(gitcask_proto::v1::Initialization::default),
+            pristine_receipt: initialize.then(|| {
+                PristineReceipt::Initialization(gitcask_proto::v1::Initialization::default())
+            }),
             response,
         }
     }

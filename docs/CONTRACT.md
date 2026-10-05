@@ -62,6 +62,9 @@ impl LocalRepo {
   /// opts.max_bytes is ignored: spool_pack enforced it (receive-pack passes None).
   pub async fn ingest_spooled(&self, pack: SpooledPack, opts: IngestOptions)
       -> Result<Option<IngestedPack>, GitError>;
+  /// Stream either all source refs (CLI) or pinned OID closure (HTTP) through normal ingestion.
+  pub async fn import_pack_from(&self, source: &Path, tips: Option<&[String]>, opts: IngestOptions)
+      -> Result<Option<IngestedPack>, GitError>;
   /// spool_pack(pack, opts.max_bytes) then ingest_spooled, for local streams (import, API writes).
   pub async fn ingest_pack<R: tokio::io::AsyncRead + Unpin + Send>(&self, pack: R, opts: IngestOptions)
       -> Result<Option<IngestedPack>, GitError>;
@@ -280,6 +283,24 @@ pub async fn serve(state: Arc<AppState>, shutdown: impl Future<Output=()> + Send
 // synchronize refs only or the complete local pack set (AGENTS.md §2.3).
 ```
 
+
+## Pristine import extensions (2026-10-05)
+
+- `gitcask-config::Config.import: ImportConfig` bounds refs, acquired objects, transferred/output pack bytes,
+  resolve timeout and acquisition timeout; [IMPORT.md](IMPORT.md) owns the defaults and wire contract.
+- `gitcask-git::RefSnapshotData.head_oid` carries detached HEAD only. Symbolic HEAD uses `head_target` and
+  resolves its OID from refs. Both conversions to/from protobuf and offline replay preserve this distinction.
+- `gitcask-git::isolated_command(path)` clears inherited Git environment/config/helpers/hooks/protocols for
+  scratch Git acquisition. The shared `LocalRepo::import_pack_from` feeds normal index-pack ingestion.
+- `gitcask-wal::RepoHandle::refs_snapshot()` captures refs/HEAD under the existing publisher sync lock
+  after freshness sync, with no additional bucket request.
+- `gitcask-wal::RepoHandle::revalidate_refs()` always performs refs-level freshness checking even with
+  optional read TTLs, for committed-result reconciliation.
+- `gitcask-wal::RepoHandle::publish_import(pack, txn, ImportReceipt, meta)` adds the pinned transaction and
+  manifest receipt in the existing publisher CAS, with pristine validation at every batch/CAS retry.
+  `Manifest.import_receipt` and `RefSnapshot.head_oid` are append-only protobuf extensions.
+- Server resolve/import/target-read receipt routes use the existing API lanes, principal checks, SSE/tasks
+  and bulk runtime. Cloud owns durable orchestration, not the Registry or ObjectStore.
 
 ## gitcask-cli (owner: Cli)
 `gitcask --config gitcask.toml <cmd>`: `serve` | `compact owner/name [--once]` |

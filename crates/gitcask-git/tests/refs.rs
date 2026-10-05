@@ -172,6 +172,7 @@ async fn load_ref_snapshot_50k_refs_fast_and_readable() {
         seq: 0,
         object_format: "sha1".into(),
         refs,
+        head_oid: String::new(),
         head_target: "refs/heads/b00000".to_string(),
         created_at: None,
     };
@@ -223,6 +224,7 @@ fn ref_snapshot_roundtrip() {
             oid: "abc".into(),
             peeled: "def".into(),
         }],
+        head_oid: String::new(),
         head_target: "refs/heads/main".into(),
     };
     let snap: RefSnapshot = data.clone().into();
@@ -249,6 +251,7 @@ fn ref_view_lookups_are_logarithmic_and_overlay_aware() {
     refs.sort_by(|a, b| a.name.cmp(&b.name));
     let snap = std::sync::Arc::new(RefSnapshotData {
         refs,
+        head_oid: String::new(),
         head_target: "refs/heads/ref-000007".into(),
     });
     let t = std::time::Instant::now();

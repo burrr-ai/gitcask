@@ -136,7 +136,7 @@ crates/
   gitcask-cli      gitcask serve|import|migrate|compact|wal|repo|token
 ```
 
-Further documentation: [docs/PRODUCT.md](docs/PRODUCT.md) (product boundaries), [docs/DIRECTION.md](docs/DIRECTION.md) (this fork's decisions), [docs/OPERATIONS.md](docs/OPERATIONS.md) (the runbook), [docs/MIGRATION.md](docs/MIGRATION.md) (moving from Gitea), [docs/ROUNDTRIPS.md](docs/ROUNDTRIPS.md) (the cost model), [docs/EVENTS.md](docs/EVENTS.md), [docs/INTEGRITY.md](docs/INTEGRITY.md), [docs/LFS.md](docs/LFS.md).
+Further documentation: [docs/IMPORT.md](docs/IMPORT.md) (pinned full-history import), [docs/INITIALIZE.md](docs/INITIALIZE.md) (parentless tree snapshots), [docs/PRODUCT.md](docs/PRODUCT.md) (product boundaries), [docs/DIRECTION.md](docs/DIRECTION.md) (this fork's decisions), [docs/OPERATIONS.md](docs/OPERATIONS.md) (the runbook), [docs/MIGRATION.md](docs/MIGRATION.md) (moving from Gitea), [docs/ROUNDTRIPS.md](docs/ROUNDTRIPS.md) (the cost model), [docs/EVENTS.md](docs/EVENTS.md), [docs/INTEGRITY.md](docs/INTEGRITY.md), [docs/LFS.md](docs/LFS.md).
 
 ## Contributing
 

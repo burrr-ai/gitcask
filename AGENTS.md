@@ -32,6 +32,7 @@ decisions numbered in §4 here); this file keeps the rules.
 | `docs/ROUNDTRIPS.md` | **Anyone touching a protocol that talks to the bucket** (publish, sync, checkpoints, compaction/leases, store backends). Round trips are the cost model; correct is not sufficient. |
 | `docs/LFS.md` | Anyone touching LFS (`lfs.rs`) or importing a repository whose LFS history lives elsewhere. |
 | `docs/INTEGRITY.md` | Anyone touching import, the maintainer's `fsck` unit, or seeing `connectivity: missing object` on a push. |
+| `docs/IMPORT.md` | Full-history pristine import: pinning, receipts, HTTPS acquisition and preservation boundaries. |
 | `docs/INITIALIZE.md` | Pristine repository initialization: pinned trees, independent objects, authorization, retries and LFS/submodule boundaries. |
 | `docs/EVENTS.md` | Anyone changing WAL-derived ref events, the webhook bridge, consumer semantics or event cursors. |
 | `docs/OPERATIONS.md` | Operators and on-call responders. Metrics, symptom-first diagnosis, capacity, incidents, recovery and routine checks. |
@@ -394,6 +395,17 @@ Decision identifiers are stable; gaps in the numbering are intentional.
   already live), and `receive.body` records `http_version` and `response_start` (`live` |
   `after_eof`) while `git.spool_pack` records received `bytes` and its `outcome` (`eof`, `too_large`,
   `error`, `cancelled`) on every exit. No bucket requests change.
+
+- **D53** **Full-history pristine import is pin → independently acquire → manifest CAS** (2026-10-05).
+  The platform persists the stateless resolve snapshot before invoking the bulk import and owns durable
+  jobs/retries/permissions; gitcask owns Git objects and one same-CAS manifest receipt. Heads/tags and symbolic
+  or detached HEAD are preserved with their complete reachable closure, never a source push or durable
+  alternate. Pristine is checked across every batch/CAS retry. Exact authorized retries return the receipt
+  without reopening source or changing later target writes; target-read receipt reconciliation requires no
+  source grant. External v1 is isolated public HTTPS SHA-1 only, DNS pinned and redirects refused, with
+  resource/deadline bounds; LFS history is refused and gitlinks never recurse. Snapshot initialize remains
+  a distinct valid operation. Append-only detached-HEAD checkpoint and receipt fields are preserved by all
+  writers. See [docs/IMPORT.md](docs/IMPORT.md); no engine job DB, identity store or new auth path is added.
 
 ---
 

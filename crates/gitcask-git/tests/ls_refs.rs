@@ -50,6 +50,7 @@ async fn setup() -> (tempfile::TempDir, LocalRepo, String, String, String) {
                 peeled: a.clone(),
             },
         ],
+        head_oid: String::new(),
         head_target: "refs/heads/main".to_string(),
         created_at: None,
     };
@@ -191,6 +192,7 @@ fn bench_ls_refs_466k() {
         seq: 0,
         object_format: "sha1".into(),
         refs,
+        head_oid: String::new(),
         head_target: "refs/heads/ref-000000".into(),
         created_at: None,
     };
@@ -276,6 +278,7 @@ async fn ls_refs_prefixes_over_many_refs_are_ranges_and_the_cache_tracks_writes(
         seq: 1,
         object_format: String::new(),
         refs,
+        head_oid: String::new(),
         head_target: "refs/heads/main".into(),
         created_at: None,
     })

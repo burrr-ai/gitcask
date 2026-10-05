@@ -177,6 +177,23 @@ async fn after_sigterm_new_object_work_is_refused_and_no_unit_starts() -> anyhow
     );
     assert!(r.text().await?.contains("restarting"));
 
+    // Import resolve and acquisition are object work; receipt reads remain
+    // refs-level reconciliation. Refusal happens before opening the source.
+    for endpoint in ["import/resolve", "import"] {
+        let body = if endpoint.ends_with("resolve") {
+            serde_json::json!({"source":"o/source"})
+        } else {
+            serde_json::json!({"operation_key":"draining","snapshot":{"source":"o/source","object_format":"sha1","refs":[],"head":{"symbolic_target":"","oid":"a".repeat(40)},"snapshot_hash":"unused"}})
+        };
+        let response = client
+            .post(format!("{}/o/r/api/{endpoint}", server.base_url))
+            .json(&body)
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(response.headers().get("retry-after").is_some());
+    }
+
     // Refs-level reads still answer (the edge's read-only fallback lands here until it sees readyz).
     let refs = server
         .get_text("/o/r.git/info/refs?service=git-upload-pack", &[])

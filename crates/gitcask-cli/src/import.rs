@@ -5,7 +5,7 @@
 //! and publishes a ref snapshot from the source repo's refs.
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -194,26 +194,11 @@ pub(crate) async fn run_with_registry(
     // Do not pass `--revs`: that mode reads an explicit revision list from
     // stdin, while `--all` already enumerates every ref in the source repo.
     let pack_started = Instant::now();
-    let mut pack_child = tokio::process::Command::new("git")
-        .args(["pack-objects", "--all", "--stdout"])
-        .current_dir(&git_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("spawning git pack-objects")?;
-
-    let stdout = pack_child
-        .stdout
-        .take()
-        .context("no stdout from git pack-objects")?;
-
-    // tokio::process::ChildStdout implements AsyncRead — stream directly into
-    // index-pack rather than buffering a potentially multi-gigabyte pack.
-    let local = handle.local();
-    let ingested = local
-        .ingest_pack(
-            stdout,
+    let ingested = handle
+        .local()
+        .import_pack_from(
+            &git_dir,
+            None,
             IngestOptions {
                 fsck: cfg.wal.fsck_objects,
                 max_bytes: Some(cfg.server.max_push_bytes.as_u64()),
@@ -221,16 +206,6 @@ pub(crate) async fn run_with_registry(
             },
         )
         .await?;
-
-    // Wait for pack-objects to finish so failures cannot be hidden by a
-    // successful index-pack (for example if the source ODB is corrupt).
-    let status = pack_child
-        .wait()
-        .await
-        .context("waiting for git pack-objects")?;
-    if !status.success() {
-        bail!("git pack-objects failed (exit {})", status);
-    }
     let pack_elapsed_ms = pack_started.elapsed().as_secs_f64() * 1_000.0;
 
     if let Some(pack) = ingested {

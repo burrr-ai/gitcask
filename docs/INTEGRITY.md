@@ -13,7 +13,9 @@ what surfaced the hole). What can:
 - **Import**: a pack set built from one ref selection and a ref snapshot taken from another. The default importer
   avoids that split by packing all source refs before publishing the selected heads and tags through the normal WAL
   path. `--reuse-packs` requires a self-contained source pack set; the audit below is the backstop for an incomplete
-  or corrupt source repository.
+  or corrupt source repository. The [HTTP pristine importer](IMPORT.md) instead packs exactly its persisted
+  heads/tags/HEAD OIDs into independent staging, fscks that closure, then publishes the same pinned ref set
+  and receipt through the existing manifest CAS. Source ref movement never changes its object selection.
 - A compaction that drops objects (reachability from a stale tip), a superseded pack GC'd too early,
   a corrupt or truncated object in the bucket. None seen; the audit below is the detector for all of them.
 

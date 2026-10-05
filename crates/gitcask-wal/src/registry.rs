@@ -227,6 +227,7 @@ impl Registry {
             writer: crate::handle::instance_id(),
             revision: 1,
             initialization: None,
+            import_receipt: None,
         };
 
         let buf = manifest.encode_to_vec();
@@ -438,7 +439,9 @@ fn disk_usage(path: &std::path::Path) -> Option<(u64, u64)> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     let c = CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: statvfs is a C output structure whose fields admit zero initialization.
     let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: c is NUL-terminated and lives through the call; st is valid writable storage.
     if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
         return None;
     }

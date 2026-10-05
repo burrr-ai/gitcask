@@ -12,6 +12,8 @@ pub(crate) mod archive;
 pub(crate) mod commit;
 mod git;
 pub(crate) mod handlers;
+pub(crate) mod import;
+mod import_transport;
 pub(crate) mod initialize;
 mod view;
 pub(crate) mod write;
@@ -250,6 +252,15 @@ pub fn router(state: Arc<AppState>) -> Router {
                 &format!("{base}/initialize"),
                 post(initialize::initialize).layer(DefaultBodyLimit::max(64 * 1024)),
             )
+            .route(
+                &format!("{base}/import/resolve"),
+                post(import::resolve).layer(DefaultBodyLimit::max(4096)),
+            )
+            .route(
+                &format!("{base}/import"),
+                post(import::import).layer(DefaultBodyLimit::max(1024 * 1024)),
+            )
+            .route(&format!("{base}/import/receipt"), get(import::receipt))
             .route(&format!("{base}/compare/{{*rest}}"), get(compare))
             .route(&format!("{base}/commit/{{sha}}"), get(commit_detail));
     }

@@ -4,7 +4,9 @@
 mod advertise;
 mod connectivity;
 mod error;
+mod import;
 mod ingest;
+pub use import::isolated_command;
 mod local;
 mod maintain;
 pub mod pkt;

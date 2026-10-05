@@ -16,7 +16,7 @@ use tracing::Instrument;
 
 use crate::error::WalError;
 use crate::progress::{ProgressRx, ProgressTx, Reporter};
-use crate::publish::{PublishRequest, PublishResult};
+use crate::publish::{PristineReceipt, PublishRequest, PublishResult};
 use crate::state::RepoState;
 use crate::sync::SyncLevel;
 use crate::tasks::{Begin, Tasks};
@@ -247,6 +247,41 @@ impl RepoHandle {
     /// this path so checkpoint planning never materializes object data.
     pub async fn sync_refs_only(&self) -> Result<crate::sync::ReadGuard<'_>, WalError> {
         self.sync_level(SyncLevel::Refs).await
+    }
+
+    /// Always revalidate committed receipts, even when ordinary reads opt into
+    /// `freshness_ttl`. A cached pristine generation must not reopen a deleted
+    /// source after another instance committed the same operation.
+    pub async fn revalidate_refs(&self) -> Result<(), WalError> {
+        self.touch();
+        let span = tracing::info_span!("wal.sync",repo=%self.id,level="Refs",changed=false,entries_applied=0u64);
+        let _guard = crate::lockwait::timed(
+            "sync_mutex",
+            &self.id,
+            self.cfg.telemetry.lock_wait_warn,
+            || self.sync_mutex.try_lock().ok(),
+            self.sync_mutex.lock(),
+        )
+        .await;
+        self.sync_locked_inner(&span).instrument(span.clone()).await
+    }
+
+    /// Capture refs and HEAD together under the publisher's refs lock. This
+    /// performs no freshness request: synchronize before capturing the snapshot.
+    pub async fn refs_snapshot(&self) -> Result<gitcask_git::RefSnapshotData, WalError> {
+        let _guard = crate::lockwait::timed(
+            "sync_mutex",
+            &self.id,
+            self.cfg.telemetry.lock_wait_warn,
+            || self.sync_mutex.try_lock().ok(),
+            self.sync_mutex.lock(),
+        )
+        .await;
+        let local = self.local.clone();
+        tokio::task::spawn_blocking(move || local.refs())
+            .await
+            .map_err(|error| WalError::Corrupt(error.to_string()))?
+            .map_err(WalError::Git)
     }
 
     /// Whether a refs-level sync should pull the local copy in the background.
@@ -628,8 +663,34 @@ impl RepoHandle {
             atomic: true,
             ..Default::default()
         };
-        self.enqueue_publish_at(Some(pack), txn, meta, true, None, Some(receipt))
-            .await
+        self.enqueue_publish_at(
+            Some(pack),
+            txn,
+            meta,
+            true,
+            None,
+            Some(PristineReceipt::Initialization(receipt)),
+        )
+        .await
+    }
+
+    /// Atomically publish independently packed full history into pristine state.
+    pub async fn publish_import(
+        &self,
+        pack: gitcask_git::IngestedPack,
+        txn: gitcask_proto::v1::RefTransaction,
+        receipt: gitcask_proto::v1::ImportReceipt,
+        meta: HashMap<String, String>,
+    ) -> Result<PublishResult, WalError> {
+        self.enqueue_publish_at(
+            Some(pack),
+            txn,
+            meta,
+            true,
+            None,
+            Some(PristineReceipt::Import(receipt)),
+        )
+        .await
     }
 
     async fn enqueue_publish_at(
@@ -639,7 +700,7 @@ impl RepoHandle {
         meta: HashMap<String, String>,
         synced: bool,
         created_at: Option<prost_types::Timestamp>,
-        initialization: Option<gitcask_proto::v1::Initialization>,
+        pristine_receipt: Option<PristineReceipt>,
     ) -> Result<PublishResult, WalError> {
         self.publish_waiters.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -649,7 +710,7 @@ impl RepoHandle {
             meta,
             synced,
             created_at,
-            initialization,
+            pristine_receipt,
             response: tx,
         };
 

@@ -1,0 +1,22 @@
+{
+  "target_owner": "project",
+  "target_repo": "repository",
+  "operation_key": "creation-123",
+  "snapshot": {
+    "source": "templates/starter",
+    "object_format": "sha1",
+    "refs": [
+      {
+        "name": "refs/heads/develop",
+        "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "peeled": ""
+      }
+    ],
+    "head": {
+      "symbolic_target": "refs/heads/develop",
+      "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "snapshot_hash": "849ee201530c869cb1f49136f02c796f5671ed65b8e42f2b46dd8e12c96e808a"
+  },
+  "request_hash": "70c69af14ac744a138cdea74d999e72f3ba0e753a67339c2c3383e98bd863e2b"
+}
