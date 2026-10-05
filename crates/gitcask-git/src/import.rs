@@ -317,44 +317,54 @@ wait "$child"
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let retained_path = scratch_path.clone();
-        let work = tokio::spawn(async move {
-            let processes = crate::ImportProcesses::default();
-            let mut future = Box::pin(
-                processes
-                    .clone()
-                    .scope(repo.finish_import_index(scratch, command)),
-            );
-            tokio::select! {
-                _result=&mut future=>anyhow::bail!("blocked index unexpectedly completed"),
-                ()=tokio::time::sleep(std::time::Duration::from_millis(500))=>{
-                    ensure!(retained_path.exists(),"scratch disappeared before termination");
-                    processes.terminate().await?;
-                    ensure!(retained_path.exists(),"scratch removed before verified process termination");
-                    drop(future);
-                    Ok::<_,anyhow::Error>(())
+        let processes = crate::ImportProcesses::default();
+        let mut future = Box::pin(
+            processes
+                .clone()
+                .scope(repo.finish_import_index(scratch, command)),
+        );
+        tokio::select! {
+            _result=&mut future=>anyhow::bail!("blocked index unexpectedly completed"),
+            result=tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while !tokio::fs::try_exists(&pid_file).await? {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
-            }
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            while !tokio::fs::try_exists(&pid_file).await? {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-            Ok::<_, std::io::Error>(())
-        })
-        .await??;
+                Ok::<_, std::io::Error>(())
+            })=>{result??;}
+        }
         let pids = tokio::fs::read_to_string(pid_file).await?;
-        work.await??;
+        ensure!(pids.split_whitespace().count() == 2);
+        for pid in pids.split_whitespace() {
+            ensure!(
+                process_is_active(pid).await?,
+                "fixture process never became active"
+            );
+        }
+        tokio::select! {
+            _result=&mut future=>anyhow::bail!("blocked index unexpectedly completed"),
+            ()=tokio::time::sleep(std::time::Duration::from_millis(500))=>{}
+        }
+        ensure!(
+            scratch_path.exists(),
+            "scratch disappeared before termination"
+        );
+        processes.terminate().await?;
+        ensure!(
+            scratch_path.exists(),
+            "scratch removed before verified process termination"
+        );
+        for pid in pids.split_whitespace() {
+            ensure!(
+                !process_is_active(pid).await?,
+                "index descendant still active before unwind"
+            );
+        }
+        drop(future);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
                 let mut active = false;
                 for pid in pids.split_whitespace() {
-                    let output = tokio::process::Command::new("ps")
-                        .args(["-p", pid, "-o", "stat="])
-                        .output()
-                        .await?;
-                    let state = String::from_utf8_lossy(&output.stdout);
-                    active |= !state.trim().is_empty() && !state.trim().starts_with('Z');
+                    active |= process_is_active(pid).await?;
                 }
                 if !active && !tokio::fs::try_exists(&scratch_path).await? {
                     break;
@@ -365,6 +375,76 @@ wait "$child"
         })
         .await??;
         ensure!(!scratch_path.exists());
+        Ok(())
+    }
+
+    async fn process_is_active(pid: &str) -> std::io::Result<bool> {
+        let output = tokio::process::Command::new("ps")
+            .args(["-p", pid, "-o", "stat="])
+            .output()
+            .await?;
+        let state = String::from_utf8_lossy(&output.stdout);
+        Ok(!state.trim().is_empty() && !state.trim().starts_with('Z'))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn import_process_drop_kills_descendants() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let pid_file = root.path().join("pids");
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 300 & child=$!; printf '%s %s\\n' \"$$\" \"$child\" > \"$1\"; wait \"$child\"", "blocked-import"])
+            .arg(&pid_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        configure_group(&mut command);
+        let mut child = command.spawn()?;
+        let group = crate::ImportProcess::new(child.id());
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !tokio::fs::try_exists(&pid_file).await? {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            Ok::<_, std::io::Error>(())
+        })
+        .await??;
+        let pids = tokio::fs::read_to_string(pid_file).await?;
+        ensure!(pids.split_whitespace().count() == 2);
+        for pid in pids.split_whitespace() {
+            ensure!(process_is_active(pid).await?);
+        }
+        drop(group);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            child.wait().await?;
+            loop {
+                let mut active = false;
+                for pid in pids.split_whitespace() {
+                    active |= process_is_active(pid).await?;
+                }
+                if !active {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Ok::<_, std::io::Error>(())
+        })
+        .await??;
+        // A failed kill of an already-reaped group must not report uncertainty.
+        let processes = crate::ImportProcesses::default();
+        processes
+            .clone()
+            .scope(async {
+                let mut group = crate::ImportProcess::new(
+                    pids.split_whitespace()
+                        .next()
+                        .and_then(|pid| pid.parse().ok()),
+                );
+                let result = processes.terminate().await;
+                group.finished();
+                result
+            })
+            .await?;
         Ok(())
     }
 }

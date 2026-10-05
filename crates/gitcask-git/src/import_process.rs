@@ -12,13 +12,12 @@ impl ImportProcesses {
     pub async fn terminate(&self) -> std::io::Result<()> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let pids: Vec<_> = self.0.lock().iter().copied().collect();
+        let mut signal_failures = Vec::new();
         for pid in &pids {
-            let _ = tokio::process::Command::new("/bin/kill")
-                .args(["-KILL", &format!("-{pid}")])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .await?;
+            let status = kill_group(*pid).await?;
+            if !status.success() {
+                signal_failures.push(format!("group {pid}: {status}"));
+            }
         }
         // Zombies cannot write/recreate scratch. Parent reaping happens when
         // the now-stopped child owners are subsequently dropped/polled.
@@ -42,6 +41,14 @@ impl ImportProcesses {
             if !active {
                 return Ok(());
             }
+            // A group may have exited before kill (ESRCH), so a failed signal
+            // is harmless only after the process table confirms no live members.
+            if !signal_failures.is_empty() {
+                return Err(std::io::Error::other(format!(
+                    "import process groups remain active after failed kill: {}",
+                    signal_failures.join(", ")
+                )));
+            }
             if std::time::Instant::now() >= deadline {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -51,6 +58,17 @@ impl ImportProcesses {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     }
+}
+
+async fn kill_group(pid: u32) -> std::io::Result<std::process::ExitStatus> {
+    // procps parses a negative PGID as a signal option without `--`. The
+    // delimiter is also supported by BSD kill; use the same argv in both paths.
+    tokio::process::Command::new("/bin/kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
 }
 /// Per-child registration; normal completion removes it. Abnormal drop also
 /// requests a kill as a backstop. Deadline cleanup uses terminate before drop.
@@ -76,12 +94,11 @@ impl Drop for ImportProcess {
                 scope.0.lock().remove(&pid);
             }
             tokio::spawn(async move {
-                let _ = tokio::process::Command::new("/bin/kill")
-                    .args(["-KILL", &format!("-{pid}")])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .await;
+                match kill_group(pid).await {
+                    Ok(status) if status.success() => {}
+                    Ok(status) => tracing::warn!(pid, %status, "import process group kill failed"),
+                    Err(error) => tracing::warn!(pid, %error, "import process group kill failed"),
+                }
             });
         }
     }
