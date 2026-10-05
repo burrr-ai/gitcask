@@ -786,3 +786,45 @@ async fn cold_source_with_missing_peel_hint_publishes_verified_tag_metadata() ->
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_connectivity_preserves_tagged_tree_and_blob_roots() -> Result<()> {
+    let server = Server::start().await?;
+    let work = seed(&server, "sha1", true, false).await?;
+    let tree = git_in(work.path(), &["rev-parse", "HEAD^{tree}"])?;
+    let blob = git_in(work.path(), &["rev-parse", "HEAD:file"])?;
+    for (name, oid) in [("tree-root", tree.trim()), ("blob-root", blob.trim())] {
+        git_in(work.path(), &["tag", name, oid])?;
+    }
+    git_in(
+        work.path(),
+        &[
+            "push",
+            "-q",
+            &server.repo_url("fixture", "source"),
+            "--tags",
+        ],
+    )?;
+    create(&server, "target", "sha1").await?;
+    let snapshot = resolve(&server).await?;
+    let request = json!({"operation_key":"noncommit-tags","snapshot":snapshot});
+    let result = post(&server, "/fixture/target/api/import", &request).await?;
+    ensure!(result.0 == 201, "{result:?}");
+    let cold = server.start_sibling_with(|_| {}).await?;
+    let clone = tempfile::tempdir()?;
+    git_in(
+        clone.path(),
+        &[
+            "clone",
+            "--bare",
+            "-q",
+            &cold.repo_url("fixture", "target"),
+            "copy",
+        ],
+    )?;
+    let path = clone.path().join("copy");
+    ensure!(git_in(&path, &["rev-parse", "refs/tags/tree-root"])?.trim() == tree.trim());
+    ensure!(git_in(&path, &["rev-parse", "refs/tags/blob-root"])?.trim() == blob.trim());
+    git_in(&path, &["fsck", "--full", "--no-dangling"])?;
+    Ok(())
+}

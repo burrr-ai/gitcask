@@ -282,7 +282,7 @@ pub(super) async fn output_input(
     let mut child = command
         .spawn()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let mut group = ProcessGroup(child.id());
+    let mut group = gitcask_git::ImportProcess::new(child.id());
     let mut stdout = child
         .stdout
         .take()
@@ -326,7 +326,7 @@ pub(super) async fn output_input(
         if e.kind() == std::io::ErrorKind::FileTooLarge {
             ApiError::PayloadTooLarge
         } else {
-            ApiError::Internal(e.to_string())
+            ApiError::ImportUnavailable("Git acquisition I/O failed".into())
         }
     })?;
     if !child
@@ -336,31 +336,17 @@ pub(super) async fn output_input(
         .success()
     {
         // Don't disclose upstream content or scratch paths in public errors.
-        return Err(ApiError::Conflict(
-            "source_snapshot_unavailable: Git acquisition failed".into(),
+        return Err(ApiError::ImportUnavailable(
+            "Git acquisition failed; retry the fixed snapshot".into(),
         ));
     }
-    group.0 = None;
+    group.finished();
     Ok(out)
 }
 
 // Killing just `git fetch` leaves its HTTP helper/index-pack children alive.
 // Every acquisition gets a fresh process group; cancellation kills that group
 // on the bulk runtime, without unsafe syscalls or a blocking wait in Drop.
-struct ProcessGroup(Option<u32>);
-impl Drop for ProcessGroup {
-    fn drop(&mut self) {
-        #[cfg(unix)]
-        if let Some(pid) = self.0.take() {
-            tokio::spawn(async move {
-                let _ = tokio::process::Command::new("/bin/kill")
-                    .args(["-KILL", &format!("-{pid}")])
-                    .status()
-                    .await;
-            });
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -701,6 +687,70 @@ mod tls_tests {
             .err()
             .context("transfer must fail")?;
         ensure!(matches!(limited.error(failure), ApiError::PayloadTooLarge));
+        // A successful HTTP response can still be damaged by a transient
+        // proxy/network path. Unknown Git failures must not become terminal409.
+        let attempts = Arc::new(AtomicU64::new(0));
+        let retry_path = source.path().to_path_buf();
+        let counter = attempts.clone();
+        let retry_router = Router::new()
+            .route(
+                "/source/info/refs",
+                get(move |request: Request<Body>| {
+                    let counter = counter.clone();
+                    let path = retry_path.clone();
+                    async move {
+                        if counter.fetch_add(1, Ordering::Relaxed) == 0 {
+                            (
+                                [(
+                                    "content-type",
+                                    "application/x-git-upload-pack-advertisement",
+                                )],
+                                "damaged advertisement",
+                            )
+                                .into_response()
+                        } else {
+                            smart(State(path), request).await
+                        }
+                    }
+                }),
+            )
+            .with_state(source.path().to_path_buf());
+        let retry_router = retry_router.route(
+            "/source/git-upload-pack",
+            post({
+                let path = source.path().to_path_buf();
+                move |request: Request<Body>| {
+                    let path = path.clone();
+                    async move { smart(State(path), request).await }
+                }
+            }),
+        );
+        let retry_origin = origin(retry_router).await?;
+        let retry_relay = Relay::with_client(
+            retry_origin.url.clone(),
+            retry_origin.client.clone(),
+            1024 * 1024,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        let mut command = git(target.path());
+        command.args(["ls-remote", &retry_relay.url]);
+        let first = output(command, 65536)
+            .await
+            .err()
+            .context("first source attempt should fail")?;
+        ensure!(matches!(
+            retry_relay.error(first),
+            ApiError::ImportUnavailable(_)
+        ));
+        let mut command = git(target.path());
+        command.args(["ls-remote", &retry_relay.url]);
+        ensure!(
+            !output(command, 65536)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e:?}"))?
+                .is_empty()
+        );
         // Redirects toward a private/metadata destination are never followed.
         let hits = Arc::new(AtomicU64::new(0));
         let counter = hits.clone();

@@ -52,7 +52,9 @@ fsck and destination connectivity checking, independently stored under target
 CAS. Source code is never checked out or executed; the source is never pushed,
 repacked or changed. Source deletion and loss of every cache do not affect the
 target. Source ref movement after resolve cannot repin the import; unavailable
-pinned objects produce 409, never a silently newer import. External servers may
+pinned objects positively missing from a complete local source/staging probe produce
+409, never a silently newer import. Unknown external fetch/subprocess failure is
+retryable 503; no human stderr text is used for classification. External servers may
 refuse fetching no-longer-advertised OIDs; that also fails as unavailable.
 
 Pristine means no committed WAL work, packs, checkpoint or initialize/import
@@ -89,8 +91,13 @@ text/event-stream` task/progress/result/error envelope (HTTP 200; terminal error
 contains its operation status). Tasks are per-instance, replayable and ephemeral;
 object work runs on the bounded bulk runtime and continues after HTTP disconnect.
 Phase-2 drain refuses new resolve/import work with 503. Acquisition has a deadline;
-cancellation terminates Git process groups, closes the scoped relay and removes
-scratch data. The WAL publisher handles uncertain CAS outcomes independently of
+deadline expiry kills and verifies every owned Git process group before unwinding
+the acquisition future and removing scratch. Process verification gets a two-second
+poll bound and three-second foreground grace. If death cannot be verified, a cleanup
+supervisor retains the future, ingest lock and scratch and retries verification;
+a retryable error never claims that deferred resources are already gone. The
+container includes procps for kill/ps. Index-pack and connectivity use supervised
+async native children only on the import path; receive-pack ingestion is unchanged. The WAL publisher handles uncertain CAS outcomes independently of
 acquisition cancellation. No engine identity, Redis, durable job DB, node routing
 or Cloud store credentials are introduced.
 
@@ -140,9 +147,10 @@ when setting its long HTTP deadline, and reconcile uncertain results by receipt.
 | 503 | Resolve busy, deadline, source DNS/transport, store/auth failure or drain; retry fixed request |
 
 Non-503 errors use the existing plain-text envelope; 503 uses retryable JSON with
-Retry-After (import failures identify `import_unavailable`). Source transport
-errors without a trustworthy Git classification can surface as pinned-source 409;
-Cloud should present this and permit retrying the same snapshot, never repin it.
+Retry-After (import failures identify `import_unavailable`). Unknown Git acquisition/audit or source transport errors return retryable503;
+Cloud retries the persisted snapshot and never repins it. External servers
+refusing a no-longer-advertised OID may also return this conservative retryable
+class when the transport cannot prove the precise source absence.
 
 ## Exact canonical hashes
 

@@ -552,14 +552,28 @@ async fn run_import(
             return Ok(result);
         }
         task.notice("Acquiring the pinned heads/tags and complete reachable history");
-        let (pack, peels) = tokio::time::timeout(
-            state.cfg.import.timeout,
-            acquire_pack(&state, &handle, &request.snapshot, id, task.reporter()),
-        )
-        .await
-        .map_err(|_| {
-            ApiError::ImportUnavailable("import deadline exceeded; retry the fixed snapshot".into())
-        })??;
+        let processes=gitcask_git::ImportProcesses::default();
+        let owned_state=state.clone();let owned_handle=handle.clone();let snapshot=request.snapshot.clone();let reporter=task.reporter();
+        let work=async move{acquire_pack(&owned_state,&owned_handle,&snapshot,id,reporter).await};
+        let mut acquisition=Box::pin(processes.clone().scope(work));
+        let (pack,peels)=tokio::select! {
+            result=&mut acquisition=>result?,
+            ()=tokio::time::sleep(state.cfg.import.timeout)=>{
+                // Preserve the acquisition future and its scratch while killing
+                // and checking the entire owned process tree, then unwind it.
+                if !matches!(tokio::time::timeout(std::time::Duration::from_secs(3),processes.terminate()).await,Ok(Ok(()))) {
+                    // Verification failure is not permission to remove live
+                    // scratch. Retain the entire acquisition until verified.
+                    tokio::spawn(async move {
+                        while !matches!(tokio::time::timeout(std::time::Duration::from_secs(3),processes.terminate()).await,Ok(Ok(()))){tokio::time::sleep(std::time::Duration::from_secs(1)).await;}
+                        drop(acquisition);
+                    });
+                    return Err(ApiError::ImportUnavailable("import cleanup could not confirm process termination".into()));
+                }
+                drop(acquisition);
+                return Err(ApiError::ImportUnavailable("import deadline exceeded; retry the fixed snapshot".into()));
+            }
+        };
         let mut updates: Vec<_> = request
             .snapshot
             .refs
@@ -675,8 +689,9 @@ async fn acquire_pack(
     if let Some(id) = id {
         let source = state.registry.open(&id).await?;
         let guard = source.sync_full().await?;
+        require_pinned_objects(source.local(), &tips).await?;
         staging
-            .import_pack_from(source.local().path(), Some(&tips), options.clone())
+            .import_pack_from_supervised(source.local().path(), Some(&tips), options.clone())
             .await
             .map_err(import_git_error)?
             .ok_or_else(|| ApiError::UnprocessableEntity("empty source pack".into()))?;
@@ -702,6 +717,7 @@ async fn acquire_pack(
             .await
             .map_err(|error| relay.error(error))?;
     }
+    require_pinned_objects(&staging, &tips).await?;
     let mut command = transport::git(staging.path());
     command.args(["rev-parse", "--is-shallow-repository"]);
     if transport::output(command, 64).await? != b"false\n" {
@@ -709,19 +725,7 @@ async fn acquire_pack(
             "shallow sources are unsupported; complete history is required".into(),
         ));
     }
-    let oids = tips
-        .iter()
-        .map(|s| {
-            gix_hash::ObjectId::from_hex(s.as_bytes())
-                .map_err(|e| ApiError::BadRequest(e.to_string()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    // Verify staging independently: old uncommitted destination packs must
-    // never supply a missing parent/blob and hide an incomplete import pack.
-    staging
-        .check_connectivity_async(&oids, false)
-        .await
-        .map_err(import_git_error)?;
+    verify_connectivity(&staging, &tips).await?;
     reporter.notice("Checking every acquired historical object for LFS pointers and object limits");
     scan_history(&staging, state.cfg.import.max_objects).await?;
     // Validate advertised branch/HEAD type and peeled tags from actual objects,
@@ -743,7 +747,7 @@ async fn acquire_pack(
                 return Err(ApiError::BadRequest("tag peeled oid mismatch".into()));
             }
             peels.push(actual);
-        } else if !r.peeled.is_empty() {
+        } else if !r.peeled.is_empty() && r.peeled != r.oid {
             return Err(ApiError::BadRequest(
                 "non-tag cannot have peeled oid".into(),
             ));
@@ -759,7 +763,7 @@ async fn acquire_pack(
     reporter.notice("Packing the pinned history independently into the target");
     let pack = target
         .local()
-        .import_pack_from(staging.path(), Some(&tips), options)
+        .import_pack_from_supervised(staging.path(), Some(&tips), options)
         .await
         .map_err(import_git_error)?
         .ok_or_else(|| ApiError::UnprocessableEntity("empty source pack".into()))?;
@@ -768,10 +772,7 @@ async fn acquire_pack(
     }
     // Closure was indexed with fsck in independent staging and repacked without
     // thinning or alternates; verify destination connectivity before CAS too.
-    target
-        .local()
-        .check_connectivity_async(&oids, false)
-        .await?;
+    verify_connectivity(target.local(), &tips).await?;
     tokio::task::spawn_blocking(move || {
         drop(staging);
         drop(scratch);
@@ -781,6 +782,48 @@ async fn acquire_pack(
     Ok((pack, peels))
 }
 
+async fn require_pinned_objects(local: &LocalRepo, tips: &[String]) -> Result<(), ApiError> {
+    let mut command = transport::git(local.path());
+    command.args(["cat-file", "--batch-check=%(objecttype)"]);
+    let input = format!("{}\n", tips.join("\n"));
+    let result =
+        transport::output_input(command, tips.len() * 80 + 1, Some(input.as_bytes())).await?;
+    let text = std::str::from_utf8(&result)
+        .map_err(|_| ApiError::ImportUnavailable("invalid object probe".into()))?;
+    for (tip, line) in tips.iter().zip(text.lines()) {
+        if line == format!("{tip} missing") {
+            return Err(ApiError::Conflict(
+                "source_snapshot_unavailable: pinned object missing".into(),
+            ));
+        }
+    }
+    if text.lines().count() != tips.len() {
+        return Err(ApiError::ImportUnavailable(
+            "incomplete object probe".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn verify_connectivity(local: &LocalRepo, tips: &[String]) -> Result<(), ApiError> {
+    verify_connectivity_command(transport::git(local.path()), tips).await
+}
+async fn verify_connectivity_command(
+    mut command: tokio::process::Command,
+    tips: &[String],
+) -> Result<(), ApiError> {
+    command.args([
+        "rev-list",
+        "--objects",
+        "--no-object-names",
+        "--stdin",
+        "--quiet",
+    ]);
+    let input = format!("{}\n", tips.join("\n"));
+    transport::output_input(command, 64, Some(input.as_bytes())).await?;
+    Ok(())
+}
+
 fn import_git_error(error: gitcask_git::GitError) -> ApiError {
     match &error {
         gitcask_git::GitError::InvalidInput(message)
@@ -788,8 +831,11 @@ fn import_git_error(error: gitcask_git::GitError) -> ApiError {
         {
             ApiError::PayloadTooLarge
         }
-        gitcask_git::GitError::MissingObject { .. } | gitcask_git::GitError::Subprocess { .. } => {
+        gitcask_git::GitError::MissingObject { .. } => {
             ApiError::Conflict("source_snapshot_unavailable: pinned closure unavailable".into())
+        }
+        gitcask_git::GitError::Subprocess { .. } | gitcask_git::GitError::Io(_) => {
+            ApiError::ImportUnavailable("Git acquisition failed; retry the fixed snapshot".into())
         }
         _ => error.into(),
     }
@@ -802,20 +848,39 @@ async fn scan_history(local: &LocalRepo, max_objects: u64) -> Result<(), ApiErro
         "--batch-all-objects",
         "--batch-check=%(objectname) %(objecttype) %(objectsize)",
     ]);
+    let mut reader = transport::git(local.path());
+    reader.args(["cat-file", "--batch"]).stdin(Stdio::piped());
+    scan_history_commands(listing, reader, max_objects).await
+}
+async fn scan_history_commands(
+    mut listing: tokio::process::Command,
+    mut reader: tokio::process::Command,
+    max_objects: u64,
+) -> Result<(), ApiError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        listing.as_std_mut().process_group(0);
+    }
     let mut listing = listing
         .spawn()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut listing_group = gitcask_git::ImportProcess::new(listing.id());
     let mut lines = BufReader::new(
         listing
             .stdout
             .take()
             .ok_or_else(|| ApiError::Internal("object listing stdout".into()))?,
     );
-    let mut reader = transport::git(local.path());
-    reader.args(["cat-file", "--batch"]).stdin(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        reader.as_std_mut().process_group(0);
+    }
     let mut reader = reader
         .spawn()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut reader_group = gitcask_git::ImportProcess::new(reader.id());
     let mut input = reader
         .stdin
         .take()
@@ -826,7 +891,8 @@ async fn scan_history(local: &LocalRepo, max_objects: u64) -> Result<(), ApiErro
             .take()
             .ok_or_else(|| ApiError::Internal("object reader stdout".into()))?,
     );
-    let io = |e: std::io::Error| ApiError::Internal(e.to_string());
+    let io =
+        |_: std::io::Error| ApiError::ImportUnavailable("source object audit I/O failed".into());
     let mut count = 0u64;
     let mut line = String::new();
     loop {
@@ -868,8 +934,12 @@ async fn scan_history(local: &LocalRepo, max_objects: u64) -> Result<(), ApiErro
     }
     drop(input);
     if !listing.wait().await.map_err(io)?.success() || !reader.wait().await.map_err(io)?.success() {
-        return Err(ApiError::Conflict("source object audit failed".into()));
+        return Err(ApiError::ImportUnavailable(
+            "source object audit failed; retry the fixed snapshot".into(),
+        ));
     }
+    listing_group.finished();
+    reader_group.finished();
     Ok(())
 }
 
@@ -894,6 +964,117 @@ mod hash_tests {
             request_hash("another", "repository", &request),
             fixture["request_hash"].as_str().unwrap_or_default()
         );
+        Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod connectivity_cancellation_tests {
+    use super::*;
+    use anyhow::{Result, ensure};
+    use std::os::unix::fs::PermissionsExt;
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_connectivity_is_cancelled_before_scratch_removal() -> Result<()> {
+        let scratch = tempfile::tempdir()?;
+        let pid_file = scratch.path().join("pids");
+        let script = scratch.path().join("blocked-connectivity");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+sleep 300 &
+child=$!
+printf '%s %s\n' "$$" "$child" > "$TEST_PID_FILE"
+wait "$child"
+"#,
+        )?;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+        let mut command = tokio::process::Command::new(&script);
+        command
+            .env("TEST_PID_FILE", &pid_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let processes = gitcask_git::ImportProcesses::default();
+        let tips = vec!["a".repeat(40)];
+        let mut future = Box::pin(
+            processes
+                .clone()
+                .scope(verify_connectivity_command(command, &tips)),
+        );
+        tokio::select! {
+            _result=&mut future=>anyhow::bail!("connectivity should block"),
+            result=tokio::time::timeout(std::time::Duration::from_secs(2),async {
+                while !tokio::fs::try_exists(&pid_file).await?{tokio::time::sleep(std::time::Duration::from_millis(5)).await;}
+                Ok::<_,std::io::Error>(())
+            })=>{result??;}
+        }
+        let pids = tokio::fs::read_to_string(&pid_file).await?;
+        processes.terminate().await?;
+        ensure!(
+            scratch.path().exists(),
+            "scratch must remain until verified termination"
+        );
+        for pid in pids.split_whitespace() {
+            let result = tokio::process::Command::new("ps")
+                .args(["-p", pid, "-o", "stat="])
+                .output()
+                .await?;
+            let state = String::from_utf8_lossy(&result.stdout);
+            ensure!(
+                state.trim().is_empty() || state.trim().starts_with('Z'),
+                "connectivity descendant still active"
+            );
+        }
+        drop(future);
+        let path = scratch.path().to_path_buf();
+        drop(scratch);
+        ensure!(!path.exists());
+        Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod failure_classification_tests {
+    use super::*;
+    #[tokio::test]
+    async fn interrupted_audit_is_retryable_and_missing_pinned_object_is_conflict()
+    -> anyhow::Result<()> {
+        let mut listing = tokio::process::Command::new("/bin/sh");
+        listing
+            .args(["-c", "exit 17"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut reader = tokio::process::Command::new("/bin/sh");
+        reader
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        assert!(matches!(
+            scan_history_commands(listing, reader, 100).await,
+            Err(ApiError::ImportUnavailable(_))
+        ));
+        assert!(matches!(
+            import_git_error(gitcask_git::GitError::Subprocess {
+                cmd: "git".into(),
+                status: Some(128),
+                stderr: "any human text".into()
+            }),
+            ApiError::ImportUnavailable(_)
+        ));
+        let root = tempfile::tempdir()?;
+        let repo = LocalRepo::init(
+            root.path(),
+            &RepoId::new("test", "source")?,
+            gitcask_git::ObjectFormat::Sha1,
+        )?;
+        assert!(matches!(
+            require_pinned_objects(&repo, &["a".repeat(40)]).await,
+            Err(ApiError::Conflict(_))
+        ));
         Ok(())
     }
 }

@@ -290,6 +290,9 @@ pub async fn serve(state: Arc<AppState>, shutdown: impl Future<Output=()> + Send
   resolve timeout and acquisition timeout; [IMPORT.md](IMPORT.md) owns the defaults and wire contract.
 - `gitcask-git::RefSnapshotData.head_oid` carries detached HEAD only. Symbolic HEAD uses `head_target` and
   resolves its OID from refs. Both conversions to/from protobuf and offline replay preserve this distinction.
+- `gitcask-git::LocalRepo::import_pack_from_supervised` uses normal bounded spool and idx/rev/pack
+  adoption with async cancellable index-pack; import-owned process scopes retain acquisition/scratch
+  through bounded termination verification before timeout unwind.
 - `gitcask-git::isolated_command(path)` clears inherited Git environment/config/helpers/hooks/protocols for
   scratch Git acquisition. The shared `LocalRepo::import_pack_from` feeds normal index-pack ingestion.
 - `gitcask-wal::RepoHandle::refs_snapshot()` captures refs/HEAD under the existing publisher sync lock
