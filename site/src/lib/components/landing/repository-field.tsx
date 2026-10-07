@@ -27,7 +27,7 @@ function readColors() {
   }
 }
 
-export type PushSample = { x: number; y: number; id: number }
+export type PushSample = { x: number; y: number; id: number; width: number }
 
 export function RepositoryField({
   onPush,
@@ -149,7 +149,7 @@ export function RepositoryField({
         const index = row * columns + column
         push(index, now)
         const [x, y] = position(index)
-        onSampleRef.current?.({ x: x + SIZE / 2, y: y + SIZE / 2, id: ++samples })
+        onSampleRef.current?.({ x: x + SIZE / 2, y: y + SIZE / 2, id: ++samples, width })
       }
       while (recent.length && now - recent[0] > 5000) recent.shift()
       if (recent.length !== reported) {

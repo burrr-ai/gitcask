@@ -64,7 +64,7 @@ const GROUPS = [
 ]
 
 const SUMMARY =
-  'A stateless git server that keeps every repository as a write-ahead log in S3-compatible object storage. ' +
+  'An open-source (Apache-2.0), stateless git server that keeps every repository as a write-ahead log in S3-compatible object storage. ' +
   'No database and no leader; any instance serves any repository, and cost scales with pushes rather than with ' +
   'the number of repositories.'
 

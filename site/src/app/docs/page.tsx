@@ -33,7 +33,7 @@ export default function OverviewPage() {
     <DocArticle
       slug=""
       title="gitcask"
-      lede="A git server that keeps every repository in an S3 bucket, so servers are disposable and cost follows pushes rather than repository count."
+      lede="An open-source git server that keeps every repository in your S3 bucket, so servers are disposable and cost follows pushes rather than repository count."
       sections={SECTIONS}
       sources={['README.md', 'GOAL.md', 'docs/PRODUCT.md']}
     >

@@ -19,10 +19,10 @@ const notoSansMono = Noto_Sans_Mono({
 })
 
 const description =
-  'A stateless git server that keeps every repository in S3-compatible object storage. No database, no leader; cost follows pushes, not repositories.'
+  'Open-source git hosting that keeps every repository in your S3 bucket. No database, no leader; cost follows pushes, not repositories.'
 
 export const metadata: Metadata = {
-  title: { default: 'gitcask — git that lives in a bucket', template: '%s · gitcask' },
+  title: { default: 'gitcask — open-source git hosting on your S3 bucket', template: '%s · gitcask' },
   description,
   openGraph: { type: 'website', siteName: 'gitcask', title: 'gitcask', description },
   twitter: { card: 'summary', title: 'gitcask', description },

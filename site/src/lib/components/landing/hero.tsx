@@ -9,6 +9,9 @@ import { RepositoryField, type PushSample } from './repository-field'
 
 const NAMES = ['mina/landing-page', 'u_8f2c41/todo-app', 'kai/portfolio', 'acme/site', 'junho/game-jam', 'sora/recipes', 'team-42/dashboard']
 
+const hex = (seed: number, salt: number) =>
+  Array.from({ length: 7 }, (_, i) => '0123456789abcdef'[(seed * 7919 + salt * 104729 + i * 31337) % 16]).join('')
+
 export function Hero() {
   const [pushes, setPushes] = useState(0)
   const [sample, setSample] = useState<PushSample | null>(null)
@@ -30,8 +33,12 @@ export function Hero() {
             style={{ left: sample.x, top: sample.y }}
           >
             <span className="absolute -top-px -left-px size-2 -translate-x-1/2 -translate-y-1/2 animate-ping rounded-full bg-primary" />
-            <span className="absolute left-3 -translate-y-1/2 animate-in fade-in slide-in-from-left-1 rounded-control border border-primary/40 bg-background/90 px-2.5 py-1 font-mono text-label whitespace-nowrap text-foreground shadow-md backdrop-blur">
+            <span
+              className={`absolute -translate-y-1/2 animate-in fade-in ${sample.x > sample.width - 280 ? 'right-3 slide-in-from-right-1' : 'left-3 slide-in-from-left-1'}`}
+            >
+              <span className="block rounded-control border border-primary/40 bg-background/90 px-2.5 py-1 font-mono text-label whitespace-nowrap text-foreground shadow-md backdrop-blur">
               {NAMES[sample.id % NAMES.length]} <span className="text-primary">pushed</span>
+              </span>
             </span>
           </div>
         ) : null}
@@ -41,7 +48,8 @@ export function Hero() {
         <div className="max-w-2xl">
           <h1 className="text-hero text-balance text-foreground">Pay for pushes, not repositories.</h1>
           <p className="mt-6 max-w-[38ch] text-lede text-soft-foreground">
-            Keep every user&rsquo;s projects in your own S3 bucket. An idle repository costs its bytes and nothing else.
+            Open-source git hosting that keeps every repository in your own S3 bucket. An idle one costs its bytes and
+            nothing else.
           </p>
           <div className="pointer-events-auto mt-10 flex flex-wrap gap-3">
             <Button asChild size="lg">
@@ -49,12 +57,14 @@ export function Hero() {
             </Button>
             <Button asChild size="lg" variant="outline" className="bg-background/70 backdrop-blur">
               <a href={REPOSITORY_URL} rel="noreferrer">
-                GitHub
+                Source on GitHub
               </a>
             </Button>
           </div>
         </div>
 
+        <div className="space-y-6">
+          <PushLog sample={sample} />
         <dl className="flex flex-wrap items-end gap-x-10 gap-y-4">
           <div className="flex items-center gap-3">
             <span aria-hidden="true" className="size-3 rounded-[3px] bg-accent ring-1 ring-border-strong/60" />
@@ -73,7 +83,34 @@ export function Hero() {
             <dt className="text-label text-soft-foreground">pushes in the last five seconds</dt>
           </div>
         </dl>
+        </div>
       </div>
     </section>
+  )
+}
+
+/**
+ * What the field is made of, in git's own words: each sampled push prints the output a user would
+ * see from `git push` against your gitcask host.
+ */
+function PushLog({ sample }: { sample: PushSample | null }) {
+  const id = sample?.id ?? 0
+  const name = NAMES[id % NAMES.length]
+  return (
+    <div
+      aria-hidden="true"
+      className="w-fit max-w-full overflow-hidden rounded-control border border-border bg-background/85 px-4 py-3 font-mono text-body-sm leading-relaxed shadow-md backdrop-blur md:text-label"
+    >
+      <p className="text-foreground">
+        <span className="text-primary">$</span> git push origin main
+      </p>
+      <div key={id} className="animate-in fade-in slide-in-from-bottom-1 duration-base">
+        <p className="truncate text-soft-foreground">To git.your-platform.dev/{name}.git</p>
+        <p className="whitespace-pre text-soft-foreground">
+          {'   '}
+          {hex(id, 1)}..{hex(id, 2)}  main -&gt; main
+        </p>
+      </div>
+    </div>
   )
 }
