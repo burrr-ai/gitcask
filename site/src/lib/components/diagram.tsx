@@ -1,32 +1,39 @@
 import { cn } from '@/lib/utils/cn'
 
 /**
- * Diagram vocabulary shared by every landing section. Diagrams are HTML, not scaled SVG, so the
+ * Diagram vocabulary for the landing page and the docs. Diagrams are HTML, not scaled SVG, so
  * labels keep their reading size on a phone and reflow instead of shrinking.
+ *
+ * Tones: `plain` an ordinary step · `brand` the point of the picture (one per diagram) ·
+ * `quiet` something outside gitcask · `good` a successful result · `gone` something removed.
  */
-
-type Tone = 'plain' | 'brand' | 'quiet' | 'gone'
+export type Tone = 'plain' | 'brand' | 'quiet' | 'good' | 'gone'
 
 const toneClass: Record<Tone, string> = {
   plain: 'border-border-strong/60 bg-card text-foreground',
   brand: 'border-primary bg-primary-surface text-primary-ink font-semibold',
   quiet: 'border-dashed border-border-strong text-soft-foreground',
+  good: 'border-success-border bg-success-surface text-success-surface-foreground',
   gone: 'border-dashed border-border-strong text-subtle-foreground line-through decoration-1',
 }
 
 export function Chip({
   tone = 'plain',
+  code = false,
   className,
   children,
 }: {
   tone?: Tone
+  /** Set when the label is literal code: a path, a header, a command. */
+  code?: boolean
   className?: string
   children: React.ReactNode
 }) {
   return (
     <span
       className={cn(
-        'inline-flex items-center justify-center gap-2 rounded-control border px-3.5 py-2.5 font-mono text-label whitespace-nowrap',
+        'inline-flex items-center justify-center gap-2 rounded-control border px-3.5 py-2.5 text-label whitespace-nowrap',
+        code && 'font-mono',
         toneClass[tone],
         className
       )}
@@ -36,7 +43,7 @@ export function Chip({
   )
 }
 
-/** A flow arrow: points down on narrow screens and right from `md`. */
+/** A flow arrow: points down on narrow screens and right from `md` unless `responsive` is off. */
 export function Arrow({ className, responsive = true }: { className?: string; responsive?: boolean }) {
   return (
     <svg
@@ -47,14 +54,32 @@ export function Arrow({ className, responsive = true }: { className?: string; re
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
-      className={cn(
-        'size-5 shrink-0 text-subtle-foreground',
-        responsive && 'rotate-90 md:rotate-0',
-        className
-      )}
+      className={cn('size-5 shrink-0 text-subtle-foreground', responsive && 'rotate-90 md:rotate-0', className)}
     >
       <path d="M4 12h15M14 7l5 5-5 5" />
     </svg>
+  )
+}
+
+/** A chain of chips joined by arrows; stacks vertically below `md`. */
+export function Flow({
+  steps,
+  className,
+}: {
+  steps: { label: React.ReactNode; tone?: Tone; code?: boolean }[]
+  className?: string
+}) {
+  return (
+    <div className={cn('flex flex-col items-start gap-2 md:flex-row md:flex-wrap md:items-center md:gap-3', className)}>
+      {steps.map((step, index) => (
+        <div key={index} className="flex flex-col items-start gap-2 md:flex-row md:items-center md:gap-3">
+          {index > 0 ? <Arrow className="ml-4 md:ml-0" /> : null}
+          <Chip tone={step.tone} code={step.code}>
+            {step.label}
+          </Chip>
+        </div>
+      ))}
+    </div>
   )
 }
 

@@ -1,6 +1,6 @@
 name: Site
 
-# Builds the documentation site (site/, AGENTS D54) whenever it or the Markdown it renders changes.
+# Builds the website (site/, AGENTS D54) whenever it or the Markdown it publishes at /llms.txt changes.
 # Build only: deployment to Cloudflare Workers is a separate pipeline.
 
 on:
@@ -10,12 +10,14 @@ on:
       - site/**
       - docs/**
       - "*.md"
+      - gitcask.example.toml
       - .github/workflows/site.yml
   pull_request:
     paths:
       - site/**
       - docs/**
       - "*.md"
+      - gitcask.example.toml
       - .github/workflows/site.yml
   workflow_dispatch:
 

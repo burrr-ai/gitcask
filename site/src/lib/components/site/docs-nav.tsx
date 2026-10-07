@@ -39,6 +39,18 @@ export function DocsNav({ onNavigate }: { onNavigate?: () => void }) {
           </ul>
         </div>
       ))}
+      <div>
+        <p className="text-title-sm text-foreground">For agents</p>
+        <ul className="mt-2 space-y-0.5">
+          {['/llms.txt', '/llms-full.txt'].map((href) => (
+            <li key={href}>
+              <a href={href} className="block rounded-control px-3 py-1.5 font-mono text-label text-soft-foreground hover:bg-accent hover:text-foreground">
+                {href}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </div>
     </nav>
   )
 }

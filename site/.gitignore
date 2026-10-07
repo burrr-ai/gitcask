@@ -6,3 +6,6 @@ node_modules/
 next-env.d.ts
 *.tsbuildinfo
 cloudflare-env.d.ts
+public/llms.txt
+public/llms-full.txt
+public/llms/

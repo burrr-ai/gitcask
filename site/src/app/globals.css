@@ -74,94 +74,50 @@
   }
 }
 
-/* ── 문서 본문 — docs/*.md 를 빌드 시점에 렌더한 HTML. 제목은 foreground, 읽을거리는 soft. ── */
+/* ── 읽기 본문(.doc) — 손으로 짠 문서 페이지의 문단·목록·링크·인라인 코드. 제목은 foreground, 읽을거리는 soft.
+   `.not-prose` 안(표·도식·단계·코드 블록)은 자기 스타일을 쓰므로 여기 규칙이 닿지 않는다. ── */
 @layer components {
   .doc {
     color: var(--soft-foreground);
-    font-size: 1rem;
+    font-size: 1.0625rem;
     line-height: 1.75;
     letter-spacing: -0.011em;
     overflow-wrap: break-word;
   }
   .doc > * + * {
-    margin-top: 1.1em;
+    margin-top: 1.25rem;
   }
-  .doc :is(h1, h2, h3, h4) {
-    color: var(--foreground);
-    font-family: var(--display-font);
-    text-wrap: balance;
-  }
-  .doc h1 {
-    font-size: var(--text-display-lg);
-    line-height: var(--text-display-lg--line-height);
-    letter-spacing: var(--text-display-lg--letter-spacing);
-    font-weight: var(--weight-bold);
-    margin-bottom: 1.5rem;
-  }
-  .doc h2 {
-    font-size: var(--text-display-sm);
-    line-height: var(--text-display-sm--line-height);
-    letter-spacing: var(--text-display-sm--letter-spacing);
-    font-weight: var(--weight-bold);
-    margin-top: 3.25rem;
-  }
-  .doc h3 {
-    font-size: var(--text-title-lg);
-    line-height: var(--text-title-lg--line-height);
-    font-weight: var(--weight-semibold);
-    margin-top: 2.25rem;
-  }
-  .doc h4 {
-    font-size: var(--text-title-md);
-    font-weight: var(--weight-semibold);
-    margin-top: 1.75rem;
-  }
-  .doc :is(h2, h3, h4) + * {
-    margin-top: 0.75em;
-  }
-  .doc a {
+  .doc :where(a):not(:where(.not-prose *)) {
     color: var(--primary);
     text-decoration: underline;
     text-decoration-color: color-mix(in srgb, var(--primary) 40%, transparent);
     text-underline-offset: 3px;
     transition: text-decoration-color var(--duration-fast);
   }
-  .doc a:hover {
+  .doc :where(a):not(:where(.not-prose *)):hover {
     text-decoration-color: var(--primary);
   }
-  .doc :is(h2, h3, h4) a {
-    color: inherit;
-    text-decoration: none;
-  }
-  .doc strong {
+  .doc :where(strong):not(:where(.not-prose *)) {
     color: var(--foreground);
     font-weight: var(--weight-semibold);
   }
-  .doc :is(ul, ol) {
+  .doc :where(ul, ol):not(:where(.not-prose, .not-prose *)) {
     padding-left: 1.4em;
   }
-  .doc ul {
+  .doc :where(ul):not(:where(.not-prose, .not-prose *)) {
     list-style: disc;
   }
-  .doc ol {
+  .doc :where(ol):not(:where(.not-prose, .not-prose *)) {
     list-style: decimal;
   }
-  .doc li + li {
-    margin-top: 0.4em;
+  .doc :where(li + li):not(:where(.not-prose *)) {
+    margin-top: 0.5em;
   }
-  .doc li::marker {
+  .doc :where(li):not(:where(.not-prose *))::marker {
     color: var(--muted-foreground);
   }
-  .doc blockquote {
-    border-left: var(--border-width-strong) solid var(--primary);
-    padding-left: 1em;
-  }
-  .doc hr {
-    border: 0;
-    border-top: var(--border-width) solid var(--border);
-    margin-block: 2.5rem;
-  }
-  .doc :not(pre) > code {
+  /* 인라인 코드는 표·정의 목록·콜아웃 안에서도 같은 모양이다(코드 블록만 제외). */
+  :where(.doc, [data-slot='table']) :where(code):not(:where(.code-block *)) {
     border-radius: calc(6px * var(--radius-scale));
     background: var(--muted);
     color: var(--foreground);
@@ -169,27 +125,29 @@
     font-family: var(--font-mono);
     font-size: 0.86em;
   }
-  .doc pre {
-    border-radius: var(--radius-control);
+
+  /* 코드 블록 — CodeBlock 이 빌드 시점에 shiki 로 칠한 HTML. */
+  .code-block {
+    overflow: hidden;
+    border-radius: var(--radius-card);
     background: var(--muted);
-    padding: 1rem 1.15rem;
-    overflow-x: auto;
+  }
+  .code-block-title {
+    border-bottom: var(--border-width) solid var(--border);
+    padding: 0.7rem 1.15rem;
     font-family: var(--font-mono);
-    font-size: 0.875rem;
-    line-height: 1.65;
-  }
-  .doc [data-slot='table-container'] {
-    border-block: var(--border-width) solid var(--border);
-  }
-  .doc td {
-    min-width: 8rem;
+    font-size: var(--text-label);
     color: var(--soft-foreground);
   }
-  .doc td:first-child {
-    color: var(--foreground);
+  .code-block pre {
+    overflow-x: auto;
+    padding: 1.1rem 1.15rem;
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    line-height: 1.7;
   }
 
-  /* shiki 듀얼 테마 — 라이트는 기본 색, 다크는 --shiki-dark 로 바꾼다. */
+  /* shiki 듀얼 테마 — 라이트는 --shiki-light, 다크는 --shiki-dark. */
   .shiki,
   .shiki span {
     color: var(--shiki-light);

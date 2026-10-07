@@ -1,21 +1,23 @@
 # gitcask site
 
-The documentation site: a landing page that shows what gitcask is, and every Markdown document in the
-repository rendered as a page. It is a separate Next.js app that is never built into or served by gitcask.
+The gitcask website: a landing page that shows why to use gitcask, hand-written docs pages for people,
+and the repository's Markdown for agents. It is a separate Next.js app; gitcask never builds or serves it.
 
-- **Content stays where it is.** Pages under `/docs` are `README.md`, `GOAL.md`, `SECURITY.md`,
-  `CONTRIBUTING.md`, `AGENTS.md` and `docs/*.md`, read at build time. Edit those files, not the site.
-  `src/lib/content/docs.ts` only decides the sidebar order and URL of each file. `docs/reference/` is
-  deliberately left out.
-- **Design rules** come from the comwit UI template: tokens in `src/app/comwit-tokens.css` (do not edit),
-  the gitcask theme in `src/app/globals.css`, components in `src/lib/components/ui`, and the rules in
-  [`design.md`](design.md). Read `design.md` before changing a screen.
-- **Hosting** is Cloudflare Workers through [OpenNext](https://opennext.js.org/cloudflare). Every page is
-  prerendered and served from the static-assets incremental cache, so the Worker never reads Markdown.
-  **That cache must be populated on deploy**: use `opennextjs-cloudflare deploy` (what `pnpm run deploy`
-  runs), or run `opennextjs-cloudflare populateCache remote` before a bare `wrangler deploy`. Without it
-  the Worker falls back to rendering, finds no Markdown, and answers 500 on `/` and `/docs` and 404 on
-  every other page.
+- **Landing** (`src/app/page.tsx`, `src/lib/components/landing/`): one value claim per scene, each with
+  an interactive object that proves it. Every number traces to the repository's Markdown.
+- **Docs** (`src/app/docs/<slug>/page.tsx`): diagrams, tables and code, not prose. The sidebar order is
+  `src/lib/content/docs.ts`. A change to a fact a page shows updates that page in the same change.
+- **For agents**: `scripts/llms.mjs` runs before every dev and build and writes `/llms.txt`,
+  `/llms-full.txt` and `/llms/<name>.md` into `public/` from the canonical Markdown, verbatim.
+  `docs/reference/` is deliberately left out.
+- **Design rules** come from the comwit UI template: tokens in `src/app/comwit-tokens.css` (do not
+  edit), the gitcask theme in `src/app/globals.css`, components in `src/lib/components/ui`, and the
+  rules in [`design.md`](design.md). Read `design.md` before changing a screen.
+- **Hosting** is Cloudflare Workers through [OpenNext](https://opennext.js.org/cloudflare). Pages are
+  prerendered and served from the static-assets incremental cache; the `llms` files are static assets.
+  Populate that cache on deploy: use `opennextjs-cloudflare deploy` (what `pnpm run deploy` runs), or run
+  `opennextjs-cloudflare populateCache remote` before a bare `wrangler deploy`. Without it pages still
+  render, but on every request, and the Worker logs a read-only cache error each time.
 
 ```sh
 pnpm install

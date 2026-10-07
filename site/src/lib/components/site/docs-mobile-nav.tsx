@@ -3,13 +3,13 @@
 import { useState } from 'react'
 
 import { Button } from '@/lib/components/ui/button'
-import { DOCS } from '@/lib/content/docs'
+import { findDoc } from '@/lib/content/docs'
 import { DocsNav } from './docs-nav'
 
 /** Below `lg` the sidebar folds into one disclosure above the page title. */
 export function DocsMobileNav({ current }: { current: string }) {
   const [open, setOpen] = useState(false)
-  const label = DOCS.find((entry) => entry.slug === current)?.label
+  const label = findDoc(current)?.label
 
   return (
     <div className="lg:hidden">
