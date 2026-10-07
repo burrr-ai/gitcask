@@ -42,7 +42,7 @@ decisions numbered in §4 here); this file keeps the rules.
 | `gitcask.standalone.toml` | The one-machine shape: one JWT-verifying `gitcask-server` on :8080 → rustfs. |
 | `deploy/nginx.conf.example` | Optional public TLS and `X-Accel-Redirect` byte offload in front of gitcask. |
 | `Dockerfile` | An OCI image. |
-| `site/` | The documentation site (D54): a Next.js app that renders the Markdown above at build time. Its design rules are `site/design.md`; read them before changing a screen. |
+| `site/` | The documentation site (D54): a Next.js app that renders the Markdown above at build time; `pnpm run docs` at the root serves it locally. Its design rules are `site/design.md`; read them before changing a screen. |
 
 ---
 

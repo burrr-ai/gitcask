@@ -19,7 +19,7 @@ repository rendered as a page. It is a separate Next.js app that is never built 
 
 ```sh
 pnpm install
-pnpm run dev        # http://localhost:3000
+pnpm run dev        # http://localhost:3000 (from the repository root: pnpm run docs)
 pnpm run build      # Next.js production build
 pnpm run preview    # OpenNext build + local Worker (wrangler dev)
 pnpm run deploy     # OpenNext build + deploy (needs Cloudflare credentials)
