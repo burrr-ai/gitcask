@@ -1,0 +1,205 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "./comwit-tokens.css";
+
+/* ════════════════════════════════════════════════════════════════
+   프로젝트 테마 — comwit-tokens.css 의 L0 값을 여기서 덮는다. 컴포넌트 파일은 손대지 않는다.
+
+   :root {
+     --brand: #0b68ba;          버튼·링크·포커스·선택 표식 전부
+     --brand-strong: #08528f;   hover
+     --radius-scale: 0.6;       모든 반경을 한 번에
+   }
+
+   전역 요소 규칙(button, h1 …)은 @layer base 안에 둔다. 레이어 밖 규칙은
+   Tailwind 유틸을 이겨 컴포넌트의 눌림·포커스 링·서체를 조용히 바꾼다.
+   ════════════════════════════════════════════════════════════════ */
+
+/* ── gitcask 테마 ──────────────────────────────────────────────────
+   브랜드: 오크 통(cask)의 구리·앰버. git 계열(#F05032 · GitLab #FC6D26 · Forgejo)과
+   DB 계열(Supabase #3ecf8e · Neon #34d59a · Turso #00face)이 이미 주황과 초록을 차지했고,
+   앰버는 그 사이에서 이름(cask)과 바로 연결된다. 라이트는 흰 바탕 링크 대비(AA)를 위해
+   구리 #A65310(5.4:1), 다크는 앰버 #F0A63A(8.8:1) 위에 잉크 글자를 얹는다.
+   ──────────────────────────────────────────────────────────────── */
+:root {
+  --brand: #a65310;
+  --brand-foreground: #ffffff;
+  --brand-strong: #8a420c;
+  --brand-ink: #6b3606;
+  --brand-surface: #fdf3e4;
+
+  --display-font: var(--font-sans);
+  --page-gutter: 1.25rem;
+  --content-width: 72rem;
+  --doc-width: 46rem;
+}
+
+.dark {
+  --brand: #f0a63a;
+  --brand-foreground: #1f1303;
+  --brand-strong: #f7ba5e;
+  --brand-ink: #f6c985;
+  --brand-surface: #2b1d0b;
+}
+
+@media (min-width: 768px) {
+  :root {
+    --page-gutter: 2rem;
+  }
+}
+
+/* 랜딩 전용 에디토리얼 타입 — design.md: 큰 문장 하나 + 증거 시각물 하나. */
+@theme inline {
+  --text-hero: clamp(2.75rem, 1.6rem + 4.6vw, 5.25rem);
+  --text-hero--line-height: 1.02;
+  --text-hero--font-weight: var(--weight-bold);
+  --text-hero--letter-spacing: calc(-0.042em * var(--tracking-scale));
+
+  --text-statement: clamp(2rem, 1.25rem + 2.8vw, 3.5rem);
+  --text-statement--line-height: 1.08;
+  --text-statement--font-weight: var(--weight-bold);
+  --text-statement--letter-spacing: calc(-0.036em * var(--tracking-scale));
+
+  --text-lede: clamp(1.125rem, 1rem + 0.45vw, 1.375rem);
+  --text-lede--line-height: 1.5;
+  --text-lede--letter-spacing: calc(-0.014em * var(--tracking-scale));
+
+  --container-content: var(--content-width);
+  --container-doc: var(--doc-width);
+}
+
+@layer base {
+  html {
+    scroll-padding-top: calc(var(--appbar-height) + 1.5rem);
+  }
+}
+
+/* ── 문서 본문 — docs/*.md 를 빌드 시점에 렌더한 HTML. 제목은 foreground, 읽을거리는 soft. ── */
+@layer components {
+  .doc {
+    color: var(--soft-foreground);
+    font-size: 1rem;
+    line-height: 1.75;
+    letter-spacing: -0.011em;
+    overflow-wrap: break-word;
+  }
+  .doc > * + * {
+    margin-top: 1.1em;
+  }
+  .doc :is(h1, h2, h3, h4) {
+    color: var(--foreground);
+    font-family: var(--display-font);
+    text-wrap: balance;
+  }
+  .doc h1 {
+    font-size: var(--text-display-lg);
+    line-height: var(--text-display-lg--line-height);
+    letter-spacing: var(--text-display-lg--letter-spacing);
+    font-weight: var(--weight-bold);
+    margin-bottom: 1.5rem;
+  }
+  .doc h2 {
+    font-size: var(--text-display-sm);
+    line-height: var(--text-display-sm--line-height);
+    letter-spacing: var(--text-display-sm--letter-spacing);
+    font-weight: var(--weight-bold);
+    margin-top: 3.25rem;
+  }
+  .doc h3 {
+    font-size: var(--text-title-lg);
+    line-height: var(--text-title-lg--line-height);
+    font-weight: var(--weight-semibold);
+    margin-top: 2.25rem;
+  }
+  .doc h4 {
+    font-size: var(--text-title-md);
+    font-weight: var(--weight-semibold);
+    margin-top: 1.75rem;
+  }
+  .doc :is(h2, h3, h4) + * {
+    margin-top: 0.75em;
+  }
+  .doc a {
+    color: var(--primary);
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, var(--primary) 40%, transparent);
+    text-underline-offset: 3px;
+    transition: text-decoration-color var(--duration-fast);
+  }
+  .doc a:hover {
+    text-decoration-color: var(--primary);
+  }
+  .doc :is(h2, h3, h4) a {
+    color: inherit;
+    text-decoration: none;
+  }
+  .doc strong {
+    color: var(--foreground);
+    font-weight: var(--weight-semibold);
+  }
+  .doc :is(ul, ol) {
+    padding-left: 1.4em;
+  }
+  .doc ul {
+    list-style: disc;
+  }
+  .doc ol {
+    list-style: decimal;
+  }
+  .doc li + li {
+    margin-top: 0.4em;
+  }
+  .doc li::marker {
+    color: var(--muted-foreground);
+  }
+  .doc blockquote {
+    border-left: var(--border-width-strong) solid var(--primary);
+    padding-left: 1em;
+  }
+  .doc hr {
+    border: 0;
+    border-top: var(--border-width) solid var(--border);
+    margin-block: 2.5rem;
+  }
+  .doc :not(pre) > code {
+    border-radius: calc(6px * var(--radius-scale));
+    background: var(--muted);
+    color: var(--foreground);
+    padding: 0.12em 0.36em;
+    font-family: var(--font-mono);
+    font-size: 0.86em;
+  }
+  .doc pre {
+    border-radius: var(--radius-control);
+    background: var(--muted);
+    padding: 1rem 1.15rem;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    line-height: 1.65;
+  }
+  .doc [data-slot='table-container'] {
+    border-block: var(--border-width) solid var(--border);
+  }
+  .doc td {
+    min-width: 8rem;
+    color: var(--soft-foreground);
+  }
+  .doc td:first-child {
+    color: var(--foreground);
+  }
+
+  /* shiki 듀얼 테마 — 라이트는 기본 색, 다크는 --shiki-dark 로 바꾼다. */
+  .shiki,
+  .shiki span {
+    color: var(--shiki-light);
+  }
+  .dark .shiki,
+  .dark .shiki span {
+    color: var(--shiki-dark);
+  }
+}
+
+@utility top-appbar {
+  top: var(--appbar-height);
+}

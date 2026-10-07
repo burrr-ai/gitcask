@@ -42,6 +42,7 @@ decisions numbered in §4 here); this file keeps the rules.
 | `gitcask.standalone.toml` | The one-machine shape: one JWT-verifying `gitcask-server` on :8080 → rustfs. |
 | `deploy/nginx.conf.example` | Optional public TLS and `X-Accel-Redirect` byte offload in front of gitcask. |
 | `Dockerfile` | An OCI image. |
+| `site/` | The documentation site (D54): a Next.js app that renders the Markdown above at build time. Its design rules are `site/design.md`; read them before changing a screen. |
 
 ---
 
@@ -406,6 +407,18 @@ Decision identifiers are stable; gaps in the numbering are intentional.
   resource/deadline bounds; LFS history is refused and gitlinks never recurse. Snapshot initialize remains
   a distinct valid operation. Append-only detached-HEAD checkpoint and receipt fields are preserved by all
   writers. See [docs/IMPORT.md](docs/IMPORT.md); no engine job DB, identity store or new auth path is added.
+
+- **D54** **The documentation site is a separate app that renders the repository's Markdown** (2026-10-07).
+  `site/` is a Next.js app deployed to Cloudflare Workers through OpenNext; it is not built into, linked
+  with or served by gitcask, which stays an API + git server. Pages under `/docs` are `README.md`,
+  `GOAL.md`, `SECURITY.md`, `CONTRIBUTING.md`, this file and `docs/*.md`, read at build time — the site
+  holds no copy of any fact (§0), and only `site/src/lib/content/docs.ts` maps files to URLs.
+  `docs/reference/` is excluded because it excerpts Cursor's post. The landing page shows mechanisms
+  as diagrams whose numbers trace to these documents. Every page is prerendered and served from the
+  static-assets incremental cache, which the deploy must populate (`opennextjs-cloudflare deploy`, or
+  `populateCache remote` before `wrangler deploy`); the Worker never reads Markdown. Its design system is the comwit UI
+  template's tokens and components (`site/design.md`). No crate, config key, route or bucket request
+  changes.
 
 ---
 
