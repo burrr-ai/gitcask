@@ -42,6 +42,7 @@ decisions numbered in §4 here); this file keeps the rules.
 | `gitcask.standalone.toml` | The one-machine shape: one JWT-verifying `gitcask-server` on :8080 → rustfs. |
 | `deploy/nginx.conf.example` | Optional public TLS and `X-Accel-Redirect` byte offload in front of gitcask. |
 | `Dockerfile` | An OCI image. |
+| `site/` | The website (D54): the value landing, hand-written docs pages, and the Markdown above published verbatim at `/llms.txt`. `pnpm run docs` at the root serves it locally; read `site/design.md` before changing a screen. |
 
 ---
 
@@ -407,6 +408,21 @@ Decision identifiers are stable; gaps in the numbering are intentional.
   a distinct valid operation. Append-only detached-HEAD checkpoint and receipt fields are preserved by all
   writers. See [docs/IMPORT.md](docs/IMPORT.md); no engine job DB, identity store or new auth path is added.
 
+- **D54** **The website is a separate app: value for people, the canonical Markdown for agents** (2026-10-07).
+  `site/` is a Next.js app deployed to Cloudflare Workers through OpenNext; it is not built into, linked
+  with or served by gitcask, which stays an API + git server. The landing page argues why to use gitcask
+  with one interactive object per claim; `/docs` pages are hand-written diagrams and tables for people.
+  Text stays where it lives: before every build `site/scripts/llms.mjs` publishes `README.md`, `GOAL.md`,
+  `SECURITY.md`, `CONTRIBUTING.md`, this file, `docs/*.md` and `gitcask.example.toml` verbatim as
+  `/llms.txt`, `/llms-full.txt` and `/llms/<name>.md` (`docs/reference/` is excluded: it excerpts
+  Cursor's post). The Markdown remains the only home of each fact; a site page that shows a fact is a
+  view of it and changes with it (§5). Every number on the site traces to these documents. Pages are
+  prerendered and served from the static-assets incremental cache, which the deploy populates
+  (`opennextjs-cloudflare deploy`, or `populateCache remote` before `wrangler deploy`); no page reads files at
+  runtime. Its design system
+  is the comwit UI template's tokens and components (`site/design.md`). No crate, config key, route or
+  bucket request changes.
+
 ---
 
 ## 5. Working rules
@@ -439,6 +455,8 @@ Decision identifiers are stable; gaps in the numbering are intentional.
 - Before changing the wire/store formats: proto is append-only; manifests/log entries must stay replayable by
   old readers within the retention window.
 - Config: `gitcask.example.toml` documents every key; change it with the code.
+- Site: a page under `site/` that shows a fact (a number, a route, a status code, a config key) is a view of the
+  Markdown that owns it; change both in the same commit (D54).
 - Test tiers: `just test` (fast, < 1 min), `just e2e`, `just warnings` (no unused/dead-code rustc warnings; the deliberate `unsafe_code` warns are not part of that gate), and
   `scripts/clippy-count.sh` (the `[workspace.lints]` set is deliberately *warn*-level and the tree carries
   historical warnings; the gate is **no regression against the base branch**, and `#[allow]` is never added to

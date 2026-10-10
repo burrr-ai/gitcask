@@ -122,6 +122,7 @@ just test          # fast hermetic tier (< 1 min)
 just e2e           # real git against a running server (~20 s)
 just ci            # what a merge requires: warnings, clippy, test, e2e
 scripts/smoke.sh . 8090                    # end-to-end against local rustfs
+pnpm run docs                              # the documentation site (site/) on localhost:3000
 cargo test -p gitcask-server --test sim    # fault injection: crashes, partitions, stale reads
 ```
 

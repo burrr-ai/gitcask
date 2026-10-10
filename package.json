@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "scripts": {
+    "docs": "pnpm --dir site install && pnpm --dir site run dev"
+  },
+  "packageManager": "pnpm@11.3.0"
+}
